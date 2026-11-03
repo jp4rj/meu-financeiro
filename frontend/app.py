@@ -20,7 +20,7 @@ with aba_lancar:
 
     if modo == "Única":
         with st.form("form_unica"):
-            data = st.date_input("Data", value=date.today())
+            data = st.date_input("Data", value=date.today(), format="DD/MM/YYYY")
             descricao = st.text_input("Descrição")
             valor = st.number_input("Valor (negativo = despesa)", step=0.01)
             categoria = st.selectbox("Categoria",
@@ -36,7 +36,7 @@ with aba_lancar:
                 st.success("Lançado!")
     else:
         with st.form("form_parcelada"):
-            data = st.date_input("Data da 1ª parcela", value=date.today())
+            data = st.date_input("Data da 1ª parcela", value=date.today(), format="DD/MM/YYYY")
             descricao = st.text_input("Descrição da compra")
             valor_total = st.number_input("Valor total (positivo)", step=0.01, min_value=0.0)
             num_parcelas = st.number_input("Nº de parcelas", min_value=2, max_value=48, value=2, step=1)
@@ -72,6 +72,7 @@ with aba_mes:
     else:
         df = pd.DataFrame(dados)
         df["data"] = pd.to_datetime(df["data"]).dt.date
+
         st.metric("Saldo do mês", f"R$ {df['valor'].sum():,.2f}")
 
         st.write("**Total por tipo:**")
@@ -82,13 +83,18 @@ with aba_mes:
         st.bar_chart(df.groupby("categoria")["valor"].sum().sort_values())
 
         st.write("**Transações (edite selecionando uma linha):**")
+
+        df_edit = df.copy()
+        df_edit["data_br"] = pd.to_datetime(df_edit["data"]).dt.strftime("%d-%m-%Y")
+        df_edit = df_edit.drop(columns=["data"])
+
         editado = st.data_editor(
-            df,
+            df_edit,
             use_container_width=True,
             hide_index=True,
             disabled=["id"],
             column_config={
-                "data": st.column_config.DateColumn("Data"),
+                "data_br": st.column_config.TextColumn("Data (DD-MM-AAAA)"),
                 "valor": st.column_config.NumberColumn("Valor", format="%.2f"),
             },
             key="editor_transacoes",
@@ -101,8 +107,9 @@ with aba_mes:
                 original = originais.get(tid)
                 if not original:
                     continue
+                data_iso = pd.to_datetime(linha["data_br"], format="%d-%m-%Y").strftime("%Y-%m-%d")
                 payload = {
-                    "data": str(linha["data"]),
+                    "data": data_iso,
                     "descricao": linha["descricao"],
                     "valor": float(linha["valor"]),
                     "categoria": linha["categoria"],
