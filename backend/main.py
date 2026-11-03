@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
+from sqlalchemy import extract
 from typing import List
 
 from .database import Base, engine, SessionLocal
@@ -10,12 +11,14 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Meu Financeiro")
 
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
 
 @app.post("/transacoes", response_model=TransacaoOut)
 def criar_transacao(t: TransacaoCreate, db: Session = Depends(get_db)):
@@ -25,6 +28,18 @@ def criar_transacao(t: TransacaoCreate, db: Session = Depends(get_db)):
     db.refresh(nova)
     return nova
 
+
 @app.get("/transacoes", response_model=List[TransacaoOut])
 def listar_transacoes(db: Session = Depends(get_db)):
     return db.query(Transacao).order_by(Transacao.data.desc()).all()
+
+
+@app.get("/transacoes/mes/{ano}/{mes}", response_model=List[TransacaoOut])
+def transacoes_do_mes(ano: int, mes: int, db: Session = Depends(get_db)):
+    return (
+        db.query(Transacao)
+        .filter(extract("year", Transacao.data) == ano)
+        .filter(extract("month", Transacao.data) == mes)
+        .order_by(Transacao.data.desc())
+        .all()
+    )
