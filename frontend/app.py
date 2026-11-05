@@ -24,7 +24,123 @@ CATEGORIAS_RECEITA = sorted([
 TIPOS_DESPESA = ["Fixo", "Cartao", "Extra"]
 TIPOS_MOV = ["Aporte", "Rendimento", "Resgate"]
 
-st.set_page_config(page_title="Meu Financeiro", layout="wide")
+st.set_page_config(page_title="Meu Financeiro", layout="wide", page_icon="💰")
+
+# ---------- CSS customizado ----------
+st.markdown("""
+<style>
+    /* Fonte base maior e mais confortável */
+    html, body, [class*="css"] {
+        font-size: 17px;
+    }
+
+    /* Títulos */
+    h1 {
+        color: #1F6F8B;
+        font-size: 2.4rem !important;
+        font-weight: 700;
+        margin-bottom: 0.2rem !important;
+    }
+    h2 {
+        color: #1F6F8B;
+        font-size: 1.7rem !important;
+        margin-top: 1.2rem !important;
+    }
+    h3 {
+        font-size: 1.3rem !important;
+        margin-top: 1rem !important;
+    }
+
+    /* Cards de métrica com fundo branco e sombra */
+    [data-testid="stMetric"] {
+        background-color: #FFFFFF;
+        border-radius: 12px;
+        padding: 18px 20px;
+        box-shadow: 0 2px 8px rgba(31, 111, 139, 0.08);
+        border-left: 4px solid #1F6F8B;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 0.95rem !important;
+        color: #5A6B75 !important;
+    }
+    [data-testid="stMetricValue"] {
+        font-size: 1.6rem !important;
+        color: #1A2B34 !important;
+    }
+
+    /* Abas */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 6px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background-color: #FFFFFF;
+        border-radius: 8px 8px 0 0;
+        padding: 10px 18px;
+        font-size: 1rem;
+        font-weight: 500;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #1F6F8B !important;
+        color: #FFFFFF !important;
+    }
+
+    /* Botões */
+    .stButton > button {
+        background-color: #1F6F8B;
+        color: #FFFFFF;
+        border-radius: 8px;
+        border: none;
+        padding: 0.5rem 1.2rem;
+        font-weight: 600;
+    }
+    .stButton > button:hover {
+        background-color: #175466;
+        color: #FFFFFF;
+    }
+
+    /* Cards coloridos semânticos */
+    .card-receita {
+        background: linear-gradient(135deg, #E8F6EE 0%, #FFFFFF 100%);
+        border-left: 5px solid #2E9E5B;
+        border-radius: 12px;
+        padding: 16px 20px;
+        margin: 8px 0;
+    }
+    .card-despesa {
+        background: linear-gradient(135deg, #FDECEA 0%, #FFFFFF 100%);
+        border-left: 5px solid #D9534F;
+        border-radius: 12px;
+        padding: 16px 20px;
+        margin: 8px 0;
+    }
+    .card-investimento {
+        background: linear-gradient(135deg, #FBF3DA 0%, #FFFFFF 100%);
+        border-left: 5px solid #C9A227;
+        border-radius: 12px;
+        padding: 16px 20px;
+        margin: 8px 0;
+    }
+    .card-label {
+        font-size: 0.9rem;
+        color: #5A6B75;
+        margin-bottom: 4px;
+    }
+    .card-value {
+        font-size: 1.5rem;
+        font-weight: 700;
+    }
+    .card-receita .card-value { color: #2E9E5B; }
+    .card-despesa .card-value { color: #D9534F; }
+    .card-investimento .card-value { color: #C9A227; }
+
+    /* Dataframe mais leve */
+    [data-testid="stDataFrame"] {
+        border-radius: 8px;
+        overflow: hidden;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 st.title("💰 Meu Financeiro")
 st.caption("Controle de gastos, despesas fixas, investimentos e parcelamentos")
 
@@ -117,20 +233,52 @@ with aba_mes:
 
         total_desp = df_desp["valor"].sum() if not df_desp.empty else 0
         total_rec = df_rec["valor"].sum() if not df_rec.empty else 0
+        aportes = resumo_inv.get("aportes", 0)
+        resgates = resumo_inv.get("resgates", 0)
         rendimentos = resumo_inv.get("rendimentos", 0)
 
         saldo_caixa = total_rec - abs(total_desp)
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Despesas", f"R$ {abs(total_desp):,.2f}")
-        c2.metric("Receitas", f"R$ {total_rec:,.2f}")
-        if saldo_caixa >= 0:
-            c3.metric("Saldo em caixa", f"R$ {saldo_caixa:,.2f}")
-        else:
-            c3.metric("Saldo em caixa", f"-R$ {abs(saldo_caixa):,.2f}")
+        # Cards coloridos
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.markdown(f"""
+            <div class="card-despesa">
+                <div class="card-label">🔴 Despesas</div>
+                <div class="card-value">R$ {abs(total_desp):,.2f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with c2:
+            st.markdown(f"""
+            <div class="card-receita">
+                <div class="card-label">🟢 Receitas</div>
+                <div class="card-value">R$ {total_rec:,.2f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with c3:
+            st.markdown(f"""
+            <div class="card-investimento">
+                <div class="card-label">🟡 Aportes</div>
+                <div class="card-value">R$ {aportes:,.2f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with c4:
+            cor_saldo = "card-receita" if saldo_caixa >= 0 else "card-despesa"
+            sinal = "" if saldo_caixa >= 0 else "-"
+            st.markdown(f"""
+            <div class="{cor_saldo}">
+                <div class="card-label">💰 Saldo em caixa</div>
+                <div class="card-value">{sinal}R$ {abs(saldo_caixa):,.2f}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-        if rendimentos > 0:
-            st.caption(f"📈 Rendimentos de investimento no mês (não entram no caixa): R$ {rendimentos:,.2f}")
+        if resgates > 0 or rendimentos > 0:
+            infos = []
+            if resgates > 0:
+                infos.append(f"🟡 Resgates no mês: R$ {resgates:,.2f} (entrada em caixa)")
+            if rendimentos > 0:
+                infos.append(f"📈 Rendimentos no mês: R$ {rendimentos:,.2f} (não entram no caixa)")
+            st.caption(" · ".join(infos))
 
         st.divider()
 
@@ -246,13 +394,13 @@ with aba_graficos:
             st.info("Nenhuma despesa neste mês.")
         else:
             por_cat = dfg_desp.groupby("categoria")["valor"].sum().abs().sort_values(ascending=False)
-            st.bar_chart(por_cat)
+            st.bar_chart(por_cat, color="#D9534F")
 
             st.markdown("### 🔴 Despesas por tipo")
             nomes_tipo = {"Fixo": "Fixo", "Cartao": "Cartão", "Extra": "Extra", "Investimento": "Investimento"}
             por_tipo = dfg_desp.groupby("tipo")["valor"].sum().abs()
             por_tipo.index = [nomes_tipo.get(t, t) for t in por_tipo.index]
-            st.bar_chart(por_tipo)
+            st.bar_chart(por_tipo, color="#D9534F")
 
         st.divider()
 
@@ -261,7 +409,7 @@ with aba_graficos:
             st.info("Nenhuma receita neste mês.")
         else:
             por_cat_r = dfg_rec.groupby("categoria")["valor"].sum().sort_values(ascending=False)
-            st.bar_chart(por_cat_r)
+            st.bar_chart(por_cat_r, color="#2E9E5B")
 
 # ============ ABA RECORRENTES ============
 with aba_recorrentes:
@@ -343,7 +491,12 @@ with aba_invest:
         st.info("Nenhum ativo cadastrado. Cadastre um ativo acima para começar.")
     else:
         total_geral = sum(a["saldo"] for a in ativos)
-        st.metric("Total investido", f"R$ {total_geral:,.2f}")
+        st.markdown(f"""
+        <div class="card-investimento">
+            <div class="card-label">💼 Total investido</div>
+            <div class="card-value">R$ {total_geral:,.2f}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
         st.write("**Posição atual:**")
         df_ativos = pd.DataFrame(ativos)[["id", "nome", "categoria", "saldo"]]

@@ -21,6 +21,10 @@ echo "Iniciando frontend em http://localhost:8501 ..."
 streamlit run frontend/app.py &
 FRONTEND_PID=$!
 
+# aguarda o Streamlit subir e abre o navegador
+sleep 2
+xdg-open http://localhost:8501 >/dev/null 2>&1 &
+
 echo ""
 echo "Backend PID: $BACKEND_PID | Frontend PID: $FRONTEND_PID"
 echo "Para encerrar os dois: Ctrl+C"
