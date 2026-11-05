@@ -6,11 +6,17 @@ from datetime import date
 import calendar
 
 from .database import Base, engine, SessionLocal
-from .models import Transacao, DespesaFixa, FixaGerada
+from .models import (
+    Transacao, Recorrente, RecorrenteGerada,
+    Ativo, MovimentacaoInvestimento,
+)
 from .schemas import (
     TransacaoCreate, TransacaoUpdate, TransacaoOut,
-    DespesaFixaCreate, DespesaFixaUpdate, DespesaFixaOut,
+    RecorrenteCreate, RecorrenteUpdate, RecorrenteOut,
     ParcelamentoCreate,
+    AtivoCreate, AtivoUpdate, AtivoOut, AtivoComSaldo,
+    MovimentacaoCreate, MovimentacaoUpdate, MovimentacaoOut,
+    ResumoInvestimentosMes,
 )
 
 Base.metadata.create_all(bind=engine)
@@ -44,7 +50,7 @@ def listar_transacoes(db: Session = Depends(get_db)):
 
 @app.get("/transacoes/mes/{ano}/{mes}", response_model=List[TransacaoOut])
 def transacoes_do_mes(ano: int, mes: int, db: Session = Depends(get_db)):
-    _gerar_fixas_do_mes(ano, mes, db)
+    _gerar_recorrentes_do_mes(ano, mes, db)
     return (
         db.query(Transacao)
         .filter(extract("year", Transacao.data) == ano)
@@ -81,7 +87,6 @@ def criar_parcelamento(p: ParcelamentoCreate, db: Session = Depends(get_db)):
     for i in range(1, p.num_parcelas + 1):
         ultimo_dia = calendar.monthrange(ano, mes)[1]
         data_parcela = date(ano, mes, min(dia, ultimo_dia))
-
         t = Transacao(
             data=data_parcela,
             descricao=f"{p.descricao} ({i}/{p.num_parcelas})",
@@ -93,7 +98,6 @@ def criar_parcelamento(p: ParcelamentoCreate, db: Session = Depends(get_db)):
         db.add(t)
         db.flush()
         criadas.append(t)
-
         mes += 1
         if mes > 12:
             mes = 1
@@ -105,16 +109,16 @@ def criar_parcelamento(p: ParcelamentoCreate, db: Session = Depends(get_db)):
     return criadas
 
 
-# ---------- Despesas fixas ----------
+# ---------- Recorrentes ----------
 
-@app.post("/despesas-fixas", response_model=DespesaFixaOut)
-def criar_despesa_fixa(d: DespesaFixaCreate, db: Session = Depends(get_db)):
-    nova = DespesaFixa(
-        descricao=d.descricao,
-        valor=-abs(d.valor),
-        categoria=d.categoria,
-        dia_vencimento=d.dia_vencimento,
-        ativa=True,
+@app.post("/recorrentes", response_model=RecorrenteOut)
+def criar_recorrente(r: RecorrenteCreate, db: Session = Depends(get_db)):
+    if r.natureza not in ("Despesa", "Receita"):
+        raise HTTPException(status_code=400, detail="Natureza deve ser 'Despesa' ou 'Receita'")
+    valor_final = -abs(r.valor) if r.natureza == "Despesa" else abs(r.valor)
+    nova = Recorrente(
+        descricao=r.descricao, valor=valor_final, categoria=r.categoria,
+        natureza=r.natureza, dia_vencimento=r.dia_vencimento, ativa=True,
     )
     db.add(nova)
     db.commit()
@@ -122,50 +126,195 @@ def criar_despesa_fixa(d: DespesaFixaCreate, db: Session = Depends(get_db)):
     return nova
 
 
-@app.get("/despesas-fixas", response_model=List[DespesaFixaOut])
-def listar_despesas_fixas(db: Session = Depends(get_db)):
-    return db.query(DespesaFixa).order_by(DespesaFixa.descricao).all()
+@app.get("/recorrentes", response_model=List[RecorrenteOut])
+def listar_recorrentes(db: Session = Depends(get_db)):
+    return db.query(Recorrente).order_by(Recorrente.descricao).all()
 
 
-@app.put("/despesas-fixas/{fixa_id}", response_model=DespesaFixaOut)
-def editar_despesa_fixa(fixa_id: int, dados: DespesaFixaUpdate, db: Session = Depends(get_db)):
-    f = db.query(DespesaFixa).filter(DespesaFixa.id == fixa_id).first()
-    if not f:
-        raise HTTPException(status_code=404, detail="Despesa fixa não encontrada")
+@app.put("/recorrentes/{recorrente_id}", response_model=RecorrenteOut)
+def editar_recorrente(recorrente_id: int, dados: RecorrenteUpdate, db: Session = Depends(get_db)):
+    r = db.query(Recorrente).filter(Recorrente.id == recorrente_id).first()
+    if not r:
+        raise HTTPException(status_code=404, detail="Recorrente não encontrado")
     alteracoes = dados.model_dump(exclude_unset=True)
+    if "natureza" in alteracoes and alteracoes["natureza"] not in (None, "Despesa", "Receita"):
+        raise HTTPException(status_code=400, detail="Natureza deve ser 'Despesa' ou 'Receita'")
     if "valor" in alteracoes and alteracoes["valor"] is not None:
-        alteracoes["valor"] = -abs(alteracoes["valor"])
+        natureza = alteracoes.get("natureza", r.natureza)
+        alteracoes["valor"] = -abs(alteracoes["valor"]) if natureza == "Despesa" else abs(alteracoes["valor"])
     for campo, valor in alteracoes.items():
-        setattr(f, campo, valor)
+        setattr(r, campo, valor)
     db.commit()
-    db.refresh(f)
-    return f
+    db.refresh(r)
+    return r
 
 
-def _gerar_fixas_do_mes(ano: int, mes: int, db: Session):
-    """Gera as transações das despesas fixas ativas do mês, sem duplicar."""
-    fixas = db.query(DespesaFixa).filter(DespesaFixa.ativa == True).all()
-    for f in fixas:
+def _gerar_recorrentes_do_mes(ano: int, mes: int, db: Session):
+    recorrentes = db.query(Recorrente).filter(Recorrente.ativa == True).all()
+    for r in recorrentes:
         ja_gerada = (
-            db.query(FixaGerada)
-            .filter(FixaGerada.despesa_fixa_id == f.id)
-            .filter(FixaGerada.ano == ano)
-            .filter(FixaGerada.mes == mes)
+            db.query(RecorrenteGerada)
+            .filter(RecorrenteGerada.recorrente_id == r.id)
+            .filter(RecorrenteGerada.ano == ano)
+            .filter(RecorrenteGerada.mes == mes)
             .first()
         )
         if ja_gerada:
             continue
-
         ultimo_dia = calendar.monthrange(ano, mes)[1]
-        dia = min(f.dia_vencimento, ultimo_dia)
+        dia = min(r.dia_vencimento, ultimo_dia)
+        tipo = "Fixo" if r.natureza == "Despesa" else "Receita"
         t = Transacao(
-            data=date(ano, mes, dia),
-            descricao=f.descricao,
-            valor=f.valor,
-            categoria=f.categoria,
-            tipo="Fixo",
-            recorrente=True,
+            data=date(ano, mes, dia), descricao=r.descricao, valor=r.valor,
+            categoria=r.categoria, tipo=tipo, recorrente=True,
         )
         db.add(t)
-        db.add(FixaGerada(despesa_fixa_id=f.id, ano=ano, mes=mes))
+        db.add(RecorrenteGerada(recorrente_id=r.id, ano=ano, mes=mes))
     db.commit()
+
+
+# ---------- Ativos ----------
+
+@app.post("/ativos", response_model=AtivoOut)
+def criar_ativo(a: AtivoCreate, db: Session = Depends(get_db)):
+    novo = Ativo(nome=a.nome, categoria=a.categoria, ativo=True)
+    db.add(novo)
+    db.commit()
+    db.refresh(novo)
+    return novo
+
+
+@app.get("/ativos", response_model=List[AtivoComSaldo])
+def listar_ativos(db: Session = Depends(get_db)):
+    ativos = db.query(Ativo).order_by(Ativo.nome).all()
+    resultado = []
+    for a in ativos:
+        movs = (
+            db.query(MovimentacaoInvestimento)
+            .filter(MovimentacaoInvestimento.ativo_id == a.id)
+            .all()
+        )
+        saldo = 0.0
+        for m in movs:
+            if m.tipo in ("Aporte", "Rendimento"):
+                saldo += m.valor
+            elif m.tipo == "Resgate":
+                saldo -= m.valor
+        resultado.append(AtivoComSaldo(
+            id=a.id, nome=a.nome, categoria=a.categoria, ativo=a.ativo, saldo=saldo,
+        ))
+    return resultado
+
+
+@app.put("/ativos/{ativo_id}", response_model=AtivoOut)
+def editar_ativo(ativo_id: int, dados: AtivoUpdate, db: Session = Depends(get_db)):
+    a = db.query(Ativo).filter(Ativo.id == ativo_id).first()
+    if not a:
+        raise HTTPException(status_code=404, detail="Ativo não encontrado")
+    for campo, valor in dados.model_dump(exclude_unset=True).items():
+        setattr(a, campo, valor)
+    db.commit()
+    db.refresh(a)
+    return a
+
+
+# ---------- Movimentações (com espelho automático no caixa) ----------
+
+def _criar_ou_atualizar_espelho(mov: MovimentacaoInvestimento, ativo: Ativo, db: Session):
+    """Garante que a transação espelho no caixa reflita a movimentação."""
+    # Rendimento não gera espelho
+    if mov.tipo == "Rendimento":
+        if mov.transacao_id:
+            espelho = db.query(Transacao).filter(Transacao.id == mov.transacao_id).first()
+            if espelho:
+                db.delete(espelho)
+            mov.transacao_id = None
+        return
+
+    valor_caixa = -abs(mov.valor) if mov.tipo == "Aporte" else abs(mov.valor)
+    descricao = f"{mov.tipo}: {ativo.nome}"
+
+    if mov.transacao_id:
+        espelho = db.query(Transacao).filter(Transacao.id == mov.transacao_id).first()
+        if espelho:
+            espelho.data = mov.data
+            espelho.descricao = descricao
+            espelho.valor = valor_caixa
+            espelho.categoria = ativo.categoria
+            espelho.tipo = "Investimento" if mov.tipo == "Aporte" else "Receita"
+            return
+
+    espelho = Transacao(
+        data=mov.data,
+        descricao=descricao,
+        valor=valor_caixa,
+        categoria=ativo.categoria,
+        tipo="Investimento" if mov.tipo == "Aporte" else "Receita",
+        recorrente=False,
+    )
+    db.add(espelho)
+    db.flush()
+    mov.transacao_id = espelho.id
+
+
+@app.post("/movimentacoes", response_model=MovimentacaoOut)
+def criar_movimentacao(m: MovimentacaoCreate, db: Session = Depends(get_db)):
+    if m.tipo not in ("Aporte", "Rendimento", "Resgate"):
+        raise HTTPException(status_code=400, detail="Tipo inválido")
+    if m.valor <= 0:
+        raise HTTPException(status_code=400, detail="Valor deve ser positivo")
+    ativo = db.query(Ativo).filter(Ativo.id == m.ativo_id).first()
+    if not ativo:
+        raise HTTPException(status_code=404, detail="Ativo não encontrado")
+
+    nova = MovimentacaoInvestimento(
+        ativo_id=m.ativo_id, data=m.data, tipo=m.tipo,
+        valor=abs(m.valor), observacao=m.observacao,
+    )
+    db.add(nova)
+    db.flush()
+    _criar_ou_atualizar_espelho(nova, ativo, db)
+    db.commit()
+    db.refresh(nova)
+    return nova
+
+
+@app.get("/movimentacoes", response_model=List[MovimentacaoOut])
+def listar_movimentacoes(ativo_id: int | None = None, db: Session = Depends(get_db)):
+    q = db.query(MovimentacaoInvestimento)
+    if ativo_id is not None:
+        q = q.filter(MovimentacaoInvestimento.ativo_id == ativo_id)
+    return q.order_by(MovimentacaoInvestimento.data.desc()).all()
+
+
+@app.put("/movimentacoes/{mov_id}", response_model=MovimentacaoOut)
+def editar_movimentacao(mov_id: int, dados: MovimentacaoUpdate, db: Session = Depends(get_db)):
+    m = db.query(MovimentacaoInvestimento).filter(MovimentacaoInvestimento.id == mov_id).first()
+    if not m:
+        raise HTTPException(status_code=404, detail="Movimentação não encontrada")
+    alteracoes = dados.model_dump(exclude_unset=True)
+    if "tipo" in alteracoes and alteracoes["tipo"] not in (None, "Aporte", "Rendimento", "Resgate"):
+        raise HTTPException(status_code=400, detail="Tipo inválido")
+    if "valor" in alteracoes and alteracoes["valor"] is not None:
+        alteracoes["valor"] = abs(alteracoes["valor"])
+    for campo, valor in alteracoes.items():
+        setattr(m, campo, valor)
+    ativo = db.query(Ativo).filter(Ativo.id == m.ativo_id).first()
+    _criar_ou_atualizar_espelho(m, ativo, db)
+    db.commit()
+    db.refresh(m)
+    return m
+
+
+@app.get("/movimentacoes/mes/{ano}/{mes}", response_model=ResumoInvestimentosMes)
+def resumo_movimentacoes_mes(ano: int, mes: int, db: Session = Depends(get_db)):
+    movs = (
+        db.query(MovimentacaoInvestimento)
+        .filter(extract("year", MovimentacaoInvestimento.data) == ano)
+        .filter(extract("month", MovimentacaoInvestimento.data) == mes)
+        .all()
+    )
+    aportes = sum(m.valor for m in movs if m.tipo == "Aporte")
+    resgates = sum(m.valor for m in movs if m.tipo == "Resgate")
+    rendimentos = sum(m.valor for m in movs if m.tipo == "Rendimento")
+    return ResumoInvestimentosMes(aportes=aportes, resgates=resgates, rendimentos=rendimentos)
