@@ -50,7 +50,22 @@ class MovimentacaoInvestimento(Base):
     id = Column(Integer, primary_key=True, index=True)
     ativo_id = Column(Integer, ForeignKey("ativos.id"), nullable=False)
     data = Column(Date, nullable=False)
-    tipo = Column(String, nullable=False)
+    tipo = Column(String, nullable=False)   # Aporte / Resgate / Rendimento / Prejuízo
     valor = Column(Float, nullable=False)
     observacao = Column(String, nullable=True)
     transacao_id = Column(Integer, ForeignKey("transacoes.id"), nullable=True)
+    automatica = Column(Boolean, default=False)  # True se foi gerada por atualização de saldo
+
+
+class AtualizacaoSaldo(Base):
+    __tablename__ = "atualizacoes_saldo"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ativo_id = Column(Integer, ForeignKey("ativos.id"), nullable=False)
+    data = Column(Date, nullable=False)
+    saldo_informado = Column(Float, nullable=False)
+    saldo_anterior = Column(Float, nullable=True)      # None na primeira atualização
+    aportes_periodo = Column(Float, nullable=False, default=0)
+    resgates_periodo = Column(Float, nullable=False, default=0)
+    rendimento_liquido = Column(Float, nullable=True)  # None na primeira
+    rendimento_percentual = Column(Float, nullable=True)  # None na primeira

@@ -10,6 +10,11 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
+from reportlab.graphics.shapes import Drawing, String
+from reportlab.graphics.charts.barcharts import HorizontalBarChart
+from reportlab.graphics.charts.linecharts import HorizontalLineChart
+from reportlab.graphics.charts.legends import Legend
+
 API = "http://127.0.0.1:8000"
 
 CATEGORIAS_DESPESA = sorted([
@@ -28,12 +33,19 @@ CATEGORIAS_RECEITA = sorted([
     "Recebimento de Empréstimo", "Outros",
 ])
 
-TIPOS_DESPESA = ["Fixo", "Cartao", "Extra"]
-TIPOS_MOV = ["Aporte", "Rendimento", "Resgate"]
+TIPOS_DESPESA_MAP = {
+    "Cartão": "Cartao",
+    "Débito Automático": "Debito Automatico",
+    "PIX/Espécie": "PIX/Especie",
+}
+
+TIPOS_MOV = ["Aporte", "Resgate"]
+
+MESES_ABREV = ["", "Jan", "Fev", "Mar", "Abr", "Mai", "Jun",
+               "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
 
 st.set_page_config(page_title="Meu Financeiro", layout="wide", page_icon="💰")
 
-# ---------- CSS customizado ----------
 st.markdown("""
 <style>
     html, body, [class*="css"] { font-size: 17px; }
@@ -84,7 +96,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ==================== GERAÇÃO DE PDF ====================
+# ==================== HELPERS DE PDF ====================
 
 def _tabela_padrao(linhas, cor_cabecalho, larguras, linhas_destaque=None):
     t = Table(linhas, colWidths=larguras)
@@ -105,6 +117,139 @@ def _tabela_padrao(linhas, cor_cabecalho, larguras, linhas_destaque=None):
             estilos.append(("FONTNAME", (0, idx), (-1, idx), "Helvetica-Bold"))
     t.setStyle(TableStyle(estilos))
     return t
+
+
+def calcular_rendimento_carteira_mes(ano, mes, ativos):
+    linhas = []
+    total_rend = 0.0
+    total_base = 0.0
+
+    for a in ativos:
+        atualizacoes = requests.get(f"{API}/atualizacoes-saldo?ativo_id={a['id']}").json()
+        no_mes = []
+        for u in atualizacoes:
+            d = datetime.strptime(u["data"], "%Y-%m-%d")
+            if d.year == ano and d.month == mes:
+                no_mes.append(u)
+
+        if not no_mes:
+            continue
+
+        rend_ativo = sum(u["rendimento_liquido"] for u in no_mes if u["rendimento_liquido"] is not None)
+        base_ativo = None
+        for u in sorted(no_mes, key=lambda x: (x["data"], x["id"])):
+            if u["saldo_anterior"] is not None:
+                base_ativo = u["saldo_anterior"]
+                break
+
+        pct_ativo = (rend_ativo / base_ativo * 100) if base_ativo and base_ativo > 0 else None
+
+        linhas.append({
+            "ativo": a["nome"],
+            "rendimento": rend_ativo,
+            "percentual": pct_ativo,
+        })
+        total_rend += rend_ativo
+        if base_ativo and base_ativo > 0:
+            total_base += base_ativo
+
+    pct_total = (total_rend / total_base * 100) if total_base > 0 else None
+    return linhas, total_rend, pct_total
+
+
+def calcular_evolucao_patrimonio(ano, mes, ativos):
+    """Retorna lista de (rotulo_mes, patrimonio_total) nos últimos 12 meses até o mês dado."""
+    pontos = []
+    for offset in range(11, -1, -1):
+        m = mes - offset
+        y = ano
+        while m <= 0:
+            m += 12
+            y -= 1
+        total = 0.0
+        for a in ativos:
+            # pega a atualização de saldo mais recente até o fim deste mês
+            atualizacoes = requests.get(f"{API}/atualizacoes-saldo?ativo_id={a['id']}").json()
+            saldo_ref = None
+            for u in sorted(atualizacoes, key=lambda x: (x["data"], x["id"])):
+                d = datetime.strptime(u["data"], "%Y-%m-%d")
+                if (d.year < y) or (d.year == y and d.month <= m):
+                    saldo_ref = u["saldo_informado"]
+                else:
+                    break
+            if saldo_ref is not None:
+                total += saldo_ref
+        pontos.append((f"{MESES_ABREV[m]}/{str(y)[2:]}", total))
+    return pontos
+
+
+def grafico_rendimento_por_ativo(linhas_rend, largura=15 * cm, altura=7 * cm):
+    """Barras horizontais: rendimento (R$) de cada ativo. Verde positivo, vermelho negativo."""
+    if not linhas_rend:
+        return None
+
+    # ordenar por rendimento (para o gráfico ficar legível)
+    linhas_ord = sorted(linhas_rend, key=lambda r: r["rendimento"])
+    nomes = [r["ativo"][:25] for r in linhas_ord]
+    valores = [round(r["rendimento"], 2) for r in linhas_ord]
+
+    d = Drawing(largura, altura)
+    chart = HorizontalBarChart()
+    chart.x = 5.5 * cm
+    chart.y = 0.8 * cm
+    chart.width = largura - 6 * cm
+    chart.height = altura - 1.5 * cm
+    chart.data = [valores]
+    chart.categoryAxis.categoryNames = nomes
+    chart.categoryAxis.labels.fontName = "Helvetica"
+    chart.categoryAxis.labels.fontSize = 7
+    chart.valueAxis.labels.fontName = "Helvetica"
+    chart.valueAxis.labels.fontSize = 7
+    chart.valueAxis.valueMin = min(0, min(valores)) * 1.1
+    chart.valueAxis.valueMax = max(0, max(valores)) * 1.1
+    chart.valueAxis.valueStep = (max(valores) - min(valores)) / 5 if valores else 1
+    chart.bars[0].strokeColor = None
+
+    # colorir cada barra
+    for i, v in enumerate(valores):
+        if v >= 0:
+            chart.bars[(0, i)].fillColor = colors.HexColor("#2E9E5B")
+        else:
+            chart.bars[(0, i)].fillColor = colors.HexColor("#D9534F")
+
+    chart.barSpacing = 3
+    d.add(chart)
+    return d
+
+
+def grafico_evolucao_patrimonio(pontos, largura=15 * cm, altura=7 * cm):
+    """Linha: evolução do patrimônio total nos últimos 12 meses."""
+    if not pontos:
+        return None
+
+    rotulos = [p[0] for p in pontos]
+    valores = [round(p[1], 2) for p in pontos]
+
+    d = Drawing(largura, altura)
+    chart = HorizontalLineChart()
+    chart.x = 2 * cm
+    chart.y = 1 * cm
+    chart.width = largura - 3 * cm
+    chart.height = altura - 2 * cm
+    chart.data = [valores]
+    chart.categoryAxis.categoryNames = rotulos
+    chart.categoryAxis.labels.fontName = "Helvetica"
+    chart.categoryAxis.labels.fontSize = 7
+    chart.categoryAxis.labels.angle = 0
+    chart.valueAxis.labels.fontName = "Helvetica"
+    chart.valueAxis.labels.fontSize = 7
+    chart.valueAxis.valueMin = 0
+    chart.valueAxis.valueMax = max(valores) * 1.15 if max(valores) > 0 else 1
+    chart.lines[0].strokeColor = colors.HexColor("#1F6F8B")
+    chart.lines[0].strokeWidth = 2
+    chart.lines[0].symbol = None
+    d.add(chart)
+    return d
 
 
 def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, movimentacoes_mes):
@@ -129,6 +274,10 @@ def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, 
         name="Sub", parent=styles["Normal"],
         textColor=colors.HexColor("#5A6B75"), fontSize=9, spaceAfter=4,
     ))
+    styles.add(ParagraphStyle(
+        name="Nota", parent=styles["Normal"],
+        textColor=colors.HexColor("#7A8A94"), fontSize=7.5, spaceBefore=4,
+    ))
 
     story = []
     meses_nome = ["", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
@@ -151,6 +300,7 @@ def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, 
         ["Aportes do mês", f"R$ {resumo_inv.get('aportes', 0):,.2f}"],
         ["Resgates do mês", f"R$ {resumo_inv.get('resgates', 0):,.2f}"],
         ["Rendimentos do mês", f"R$ {resumo_inv.get('rendimentos', 0):,.2f}"],
+        ["Prejuízos do mês", f"R$ {resumo_inv.get('prejuizos', 0):,.2f}"],
         ["Saldo vindo do mês anterior", f"R$ {saldo_ant:,.2f}"],
         ["Saldo atual (acumulado)", f"R$ {saldo_atual:,.2f}"],
     ]
@@ -184,7 +334,7 @@ def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, 
         story.append(_tabela_padrao(linhas, "#2E9E5B", [2.2 * cm, 5.5 * cm, 3.5 * cm, 2 * cm, 2.3 * cm]))
     story.append(Spacer(1, 14))
 
-    # ---- Investimentos: posição ----
+    # ---- Posição de investimentos ----
     story.append(Paragraph("Posição de investimentos", styles["H2Custom"]))
     if not ativos:
         story.append(Paragraph("Nenhum ativo cadastrado.", styles["Normal"]))
@@ -199,7 +349,63 @@ def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, 
                                      linhas_destaque=[len(linhas) - 1]))
     story.append(Spacer(1, 14))
 
-    # ---- Investimentos: movimentações do mês ----
+    # ---- Rendimento da carteira no mês ----
+    story.append(Paragraph("Rendimento da carteira no mês", styles["H2Custom"]))
+    linhas_rend, total_rend, pct_total = calcular_rendimento_carteira_mes(ano, mes, ativos)
+
+    if not linhas_rend:
+        story.append(Paragraph(
+            "Nenhum ativo teve atualização de saldo neste mês — rendimento não calculado.",
+            styles["Normal"],
+        ))
+    else:
+        dados_rend = [["Ativo", "Rendimento no mês", "Percentual no mês"]]
+        for r in linhas_rend:
+            rend = r["rendimento"]
+            pct = r["percentual"]
+            sinal = "+" if rend >= 0 else "−"
+            tipo_str = "Rendimento" if rend >= 0 else "Prejuízo"
+            pct_str = f"{pct:+.2f}%" if pct is not None else "—"
+            dados_rend.append([
+                r["ativo"][:35],
+                f"{sinal}R$ {abs(rend):,.2f} ({tipo_str})",
+                pct_str,
+            ])
+        sinal_tot = "+" if total_rend >= 0 else "−"
+        tipo_tot = "Rendimento" if total_rend >= 0 else "Prejuízo"
+        pct_tot_str = f"{pct_total:+.2f}%" if pct_total is not None else "—"
+        dados_rend.append([
+            "TOTAL DA CARTEIRA",
+            f"{sinal_tot}R$ {abs(total_rend):,.2f} ({tipo_tot})",
+            pct_tot_str,
+        ])
+        story.append(_tabela_padrao(
+            dados_rend, "#C9A227", [8 * cm, 5 * cm, 3 * cm],
+            linhas_destaque=[len(dados_rend) - 1],
+        ))
+        story.append(Paragraph(
+            "Nota: o rendimento considera apenas ativos com atualização de saldo registrada neste mês. "
+            "Aportes e resgates do período são desconsiderados no cálculo do rendimento.",
+            styles["Nota"],
+        ))
+
+        # ---- Gráficos ----
+        story.append(Spacer(1, 10))
+        story.append(Paragraph("Gráfico — Rendimento por ativo no mês", styles["H2Custom"]))
+        g1 = grafico_rendimento_por_ativo(linhas_rend)
+        if g1 is not None:
+            story.append(g1)
+
+        story.append(Spacer(1, 10))
+        story.append(Paragraph("Gráfico — Evolução do patrimônio (últimos 12 meses)", styles["H2Custom"]))
+        pontos_patrimonio = calcular_evolucao_patrimonio(ano, mes, ativos)
+        g2 = grafico_evolucao_patrimonio(pontos_patrimonio)
+        if g2 is not None:
+            story.append(g2)
+
+    story.append(Spacer(1, 14))
+
+    # ---- Movimentações de investimento ----
     story.append(Paragraph("Movimentações de investimento no mês", styles["H2Custom"]))
     if not movimentacoes_mes:
         story.append(Paragraph("Nenhuma movimentação de investimento neste mês.", styles["Normal"]))
@@ -237,11 +443,12 @@ with aba_lancar:
     )
 
     if natureza == "Despesa":
-        tipo = st.selectbox(
-            "Tipo", TIPOS_DESPESA, index=1,
-            help="Fixo = luz, internet, condomínio. Cartão = compras no cartão. Extra = seguros e eventuais.",
+        tipo_label = st.selectbox(
+            "Tipo", list(TIPOS_DESPESA_MAP.keys()), index=0,
+            help="Cartão = compras no cartão. Débito Automático = cobranças automáticas. PIX/Espécie = pagamentos à vista.",
             key="tipo_lancar",
         )
+        tipo = TIPOS_DESPESA_MAP[tipo_label]
         categorias = CATEGORIAS_DESPESA
         modo = st.radio(
             "Forma de lançamento", ["Única", "Parcelada"], horizontal=True,
@@ -338,6 +545,7 @@ with aba_mes:
         aportes = resumo_inv.get("aportes", 0)
         resgates = resumo_inv.get("resgates", 0)
         rendimentos = resumo_inv.get("rendimentos", 0)
+        prejuizos = resumo_inv.get("prejuizos", 0)
 
         saldo_anterior = acumulado_ant.get("saldo", 0)
         saldo_atual = acumulado.get("saldo", 0)
@@ -386,12 +594,14 @@ with aba_mes:
             </div>
             """, unsafe_allow_html=True)
 
-        if resgates > 0 or rendimentos > 0:
-            infos = []
-            if resgates > 0:
-                infos.append(f"🟡 Resgates no mês: R$ {resgates:,.2f} (entrada em caixa)")
-            if rendimentos > 0:
-                infos.append(f"📈 Rendimentos no mês: R$ {rendimentos:,.2f} (não entram no caixa)")
+        infos = []
+        if resgates > 0:
+            infos.append(f"🟡 Resgates no mês: R$ {resgates:,.2f} (entrada em caixa)")
+        if rendimentos > 0:
+            infos.append(f"📈 Rendimentos no mês: R$ {rendimentos:,.2f} (não entram no caixa)")
+        if prejuizos > 0:
+            infos.append(f"📉 Prejuízos no mês: R$ {prejuizos:,.2f} (não entram no caixa)")
+        if infos:
             st.caption(" · ".join(infos))
 
         st.divider()
@@ -402,7 +612,9 @@ with aba_mes:
         else:
             st.write(f"**Total: R$ {abs(total_desp):,.2f}**")
             st.write("**Total por tipo:**")
-            nomes_tipo = {"Fixo": "Fixo", "Cartao": "Cartão", "Extra": "Extra", "Investimento": "Investimento"}
+            nomes_tipo = {"Fixo": "Fixo (legado)", "Cartao": "Cartão", "Extra": "Extra (legado)",
+                          "Debito Automatico": "Débito Automático", "PIX/Especie": "PIX/Espécie",
+                          "Investimento": "Investimento"}
             por_tipo = df_desp.groupby("tipo")["valor"].sum().reset_index()
             por_tipo["tipo"] = por_tipo["tipo"].map(lambda x: nomes_tipo.get(x, x))
             por_tipo["valor"] = por_tipo["valor"].abs()
@@ -509,7 +721,9 @@ with aba_graficos:
             st.bar_chart(por_cat, color="#D9534F")
 
             st.markdown("### 🔴 Despesas por tipo")
-            nomes_tipo = {"Fixo": "Fixo", "Cartao": "Cartão", "Extra": "Extra", "Investimento": "Investimento"}
+            nomes_tipo = {"Fixo": "Fixo (legado)", "Cartao": "Cartão", "Extra": "Extra (legado)",
+                          "Debito Automatico": "Débito Automático", "PIX/Especie": "PIX/Espécie",
+                          "Investimento": "Investimento"}
             por_tipo = dfg_desp.groupby("tipo")["valor"].sum().abs()
             por_tipo.index = [nomes_tipo.get(t, t) for t in por_tipo.index]
             st.bar_chart(por_tipo, color="#D9534F")
@@ -617,15 +831,51 @@ with aba_invest:
 
         st.divider()
 
-        st.markdown("### Nova movimentação")
         nomes_ativos = {a["nome"]: a["id"] for a in ativos}
 
+        st.markdown("### Atualizar saldo do ativo")
+        st.caption("Informe o saldo atual do ativo. O rendimento (ou prejuízo) será calculado automaticamente, desconsiderando aportes e resgates do período.")
+
+        with st.form("form_atualizacao"):
+            ativo_sel_u = st.selectbox("Ativo", list(nomes_ativos.keys()), key="ativo_atualizacao")
+            data_u = st.date_input("Data da atualização", value=date.today(), format="DD/MM/YYYY", key="data_atualizacao")
+            saldo_u = st.number_input("Saldo atual informado", step=None, min_value=0.0, format="%.2f", key="saldo_atualizacao")
+            enviar_u = st.form_submit_button("Atualizar saldo")
+
+            if enviar_u and saldo_u >= 0:
+                r = requests.post(f"{API}/atualizacoes-saldo", json={
+                    "ativo_id": nomes_ativos[ativo_sel_u],
+                    "data": str(data_u),
+                    "saldo_informado": saldo_u,
+                })
+                if r.status_code == 200:
+                    resp = r.json()
+                    if resp.get("rendimento_liquido") is None:
+                        st.toast(f"Saldo inicial de R$ {saldo_u:,.2f} registrado.", icon="✅")
+                    else:
+                        rend = resp["rendimento_liquido"]
+                        pct = resp.get("rendimento_percentual") or 0
+                        if rend > 0:
+                            st.toast(f"Rendimento de R$ {rend:,.2f} ({pct:+.2f}%) calculado.", icon="📈")
+                        elif rend < 0:
+                            st.toast(f"Prejuízo de R$ {abs(rend):,.2f} ({pct:+.2f}%) calculado.", icon="📉")
+                        else:
+                            st.toast("Saldo atualizado. Sem rendimento no período.", icon="✅")
+                    st.rerun()
+                else:
+                    st.error(f"Erro: {r.text}")
+
+        st.divider()
+
+        st.markdown("### Nova movimentação")
+        st.caption("Apenas Aporte e Resgate. Rendimento e Prejuízo vêm da atualização de saldo.")
+
         with st.form("form_mov"):
-            ativo_sel = st.selectbox("Ativo", list(nomes_ativos.keys()))
-            tipo_mov = st.selectbox("Tipo", TIPOS_MOV)
-            data_mov = st.date_input("Data", value=date.today(), format="DD/MM/YYYY")
-            valor_mov = st.number_input("Valor", step=None, min_value=0.0, format="%.2f")
-            obs_mov = st.text_input("Observação (opcional)")
+            ativo_sel = st.selectbox("Ativo", list(nomes_ativos.keys()), key="ativo_mov")
+            tipo_mov = st.selectbox("Tipo", TIPOS_MOV, key="tipo_mov")
+            data_mov = st.date_input("Data", value=date.today(), format="DD/MM/YYYY", key="data_mov")
+            valor_mov = st.number_input("Valor", step=None, min_value=0.0, format="%.2f", key="valor_mov")
+            obs_mov = st.text_input("Observação (opcional)", key="obs_mov")
             enviar_mov = st.form_submit_button("Lançar movimentação")
 
             if enviar_mov and valor_mov > 0:
@@ -635,15 +885,48 @@ with aba_invest:
                     "valor": valor_mov,
                     "observacao": obs_mov if obs_mov else None,
                 })
-                st.toast(
-                    f"{tipo_mov} de R$ {valor_mov:,.2f} em '{ativo_sel}' efetivado.",
-                    icon="✅",
-                )
+                st.toast(f"{tipo_mov} de R$ {valor_mov:,.2f} em '{ativo_sel}' efetivado.", icon="✅")
                 st.rerun()
 
         st.divider()
 
-        st.markdown("### Histórico e edição")
+        st.markdown("### Histórico de atualizações de saldo")
+        ativo_hist_u = st.selectbox("Ver atualizações de:", list(nomes_ativos.keys()), key="hist_ativo_u")
+        atualizacoes = requests.get(f"{API}/atualizacoes-saldo?ativo_id={nomes_ativos[ativo_hist_u]}").json()
+
+        if not atualizacoes:
+            st.info("Nenhuma atualização de saldo para este ativo.")
+        else:
+            rows = []
+            for a in atualizacoes:
+                data_br = datetime.strptime(a["data"], "%Y-%m-%d").strftime("%d/%m/%Y")
+                if a["rendimento_liquido"] is None:
+                    rows.append({
+                        "Data": data_br,
+                        "Saldo informado": f"R$ {a['saldo_informado']:,.2f}",
+                        "Aportes": "—",
+                        "Resgates": "—",
+                        "Rendimento": "Saldo inicial",
+                        "Percentual": "—",
+                    })
+                else:
+                    rend = a["rendimento_liquido"]
+                    pct = a["rendimento_percentual"]
+                    sinal = "+" if rend >= 0 else "−"
+                    tipo_rend = "Rendimento" if rend >= 0 else "Prejuízo"
+                    rows.append({
+                        "Data": data_br,
+                        "Saldo informado": f"R$ {a['saldo_informado']:,.2f}",
+                        "Aportes": f"R$ {a['aportes_periodo']:,.2f}",
+                        "Resgates": f"R$ {a['resgates_periodo']:,.2f}",
+                        f"{tipo_rend}": f"{sinal}R$ {abs(rend):,.2f}",
+                        "Percentual": f"{pct:+.2f}%" if pct is not None else "—",
+                    })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        st.divider()
+
+        st.markdown("### Histórico de movimentações (Aporte / Resgate / Rendimento / Prejuízo)")
         ativo_hist = st.selectbox("Ver movimentações de:", list(nomes_ativos.keys()), key="hist_ativo")
         movs = requests.get(f"{API}/movimentacoes?ativo_id={nomes_ativos[ativo_hist]}").json()
 
@@ -652,13 +935,13 @@ with aba_invest:
         else:
             dfm = pd.DataFrame(movs)
             dfm["data_br"] = pd.to_datetime(dfm["data"]).dt.strftime("%d-%m-%Y")
-            dfm = dfm[["id", "data_br", "tipo", "valor", "observacao"]]
+            dfm["editavel"] = dfm["automatica"].apply(lambda x: "Não (auto)" if x else "Sim")
+            dfm = dfm[["id", "data_br", "tipo", "valor", "observacao", "editavel"]]
 
             editado_m = st.data_editor(
-                dfm, use_container_width=True, hide_index=True, disabled=["id"],
+                dfm, use_container_width=True, hide_index=True, disabled=["id", "editavel"],
                 column_config={
                     "data_br": st.column_config.TextColumn("Data (DD-MM-AAAA)"),
-                    "tipo": st.column_config.SelectboxColumn("Tipo", options=TIPOS_MOV),
                     "valor": st.column_config.NumberColumn("Valor", format="%.2f"),
                 },
                 key="editor_movimentacoes",
@@ -669,7 +952,7 @@ with aba_invest:
                 for _, linha in editado_m.iterrows():
                     mid = int(linha["id"])
                     original = originais.get(mid)
-                    if not original:
+                    if not original or original.get("automatica"):
                         continue
                     data_iso = pd.to_datetime(linha["data_br"], format="%d-%m-%Y").strftime("%Y-%m-%d")
                     payload = {
@@ -686,7 +969,7 @@ with aba_invest:
 # ============ ABA RELATÓRIOS ============
 with aba_relatorios:
     st.subheader("Relatórios em PDF")
-    st.caption("Gera um PDF completo do mês: totais, despesas, receitas, posição e movimentações de investimentos.")
+    st.caption("Gera um PDF completo do mês: totais, despesas, receitas, posição e movimentações de investimentos, rendimento da carteira e gráficos.")
 
     hoje = date.today()
     col1, col2 = st.columns(2)
@@ -704,7 +987,6 @@ with aba_relatorios:
 
         ativos_r = requests.get(f"{API}/ativos").json()
 
-        # Buscar movimentações de investimento do mês (todos os ativos)
         movs_mes = []
         for a in ativos_r:
             movs_ativo = requests.get(f"{API}/movimentacoes?ativo_id={a['id']}").json()

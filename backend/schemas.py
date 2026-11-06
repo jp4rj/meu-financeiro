@@ -115,6 +115,28 @@ class MovimentacaoOut(BaseModel):
     valor: float
     observacao: Optional[str] = None
     transacao_id: Optional[int] = None
+    automatica: bool = False
+
+    class Config:
+        from_attributes = True
+
+
+class AtualizacaoSaldoCreate(BaseModel):
+    ativo_id: int
+    data: date
+    saldo_informado: float
+
+
+class AtualizacaoSaldoOut(BaseModel):
+    id: int
+    ativo_id: int
+    data: date
+    saldo_informado: float
+    saldo_anterior: Optional[float] = None
+    aportes_periodo: float
+    resgates_periodo: float
+    rendimento_liquido: Optional[float] = None
+    rendimento_percentual: Optional[float] = None
 
     class Config:
         from_attributes = True
@@ -124,3 +146,4 @@ class ResumoInvestimentosMes(BaseModel):
     aportes: float
     resgates: float
     rendimentos: float
+    prejuizos: float

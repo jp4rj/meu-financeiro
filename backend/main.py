@@ -9,7 +9,7 @@ import calendar
 from .database import Base, engine, SessionLocal
 from .models import (
     Transacao, Recorrente, RecorrenteGerada,
-    Ativo, MovimentacaoInvestimento,
+    Ativo, MovimentacaoInvestimento, AtualizacaoSaldo,
 )
 from .schemas import (
     TransacaoCreate, TransacaoUpdate, TransacaoOut,
@@ -17,6 +17,7 @@ from .schemas import (
     ParcelamentoCreate,
     AtivoCreate, AtivoUpdate, AtivoOut, AtivoComSaldo,
     MovimentacaoCreate, MovimentacaoUpdate, MovimentacaoOut,
+    AtualizacaoSaldoCreate, AtualizacaoSaldoOut,
     ResumoInvestimentosMes,
 )
 
@@ -193,22 +194,39 @@ def criar_ativo(a: AtivoCreate, db: Session = Depends(get_db)):
     return novo
 
 
+def _calcular_saldo_ativo(ativo_id: int, db: Session) -> float:
+    """Saldo do ativo = saldo da última atualização + (aportes − resgates) desde ela."""
+    ultima = (
+        db.query(AtualizacaoSaldo)
+        .filter(AtualizacaoSaldo.ativo_id == ativo_id)
+        .order_by(AtualizacaoSaldo.data.desc(), AtualizacaoSaldo.id.desc())
+        .first()
+    )
+    if not ultima:
+        return 0.0
+
+    movs_desde = (
+        db.query(MovimentacaoInvestimento)
+        .filter(MovimentacaoInvestimento.ativo_id == ativo_id)
+        .filter(MovimentacaoInvestimento.data >= ultima.data)
+        .filter(MovimentacaoInvestimento.automatica == False)
+        .all()
+    )
+    delta = 0.0
+    for m in movs_desde:
+        if m.tipo == "Aporte":
+            delta += m.valor
+        elif m.tipo == "Resgate":
+            delta -= m.valor
+    return ultima.saldo_informado + delta
+
+
 @app.get("/ativos", response_model=List[AtivoComSaldo])
 def listar_ativos(db: Session = Depends(get_db)):
     ativos = db.query(Ativo).order_by(Ativo.nome).all()
     resultado = []
     for a in ativos:
-        movs = (
-            db.query(MovimentacaoInvestimento)
-            .filter(MovimentacaoInvestimento.ativo_id == a.id)
-            .all()
-        )
-        saldo = 0.0
-        for m in movs:
-            if m.tipo in ("Aporte", "Rendimento"):
-                saldo += m.valor
-            elif m.tipo == "Resgate":
-                saldo -= m.valor
+        saldo = _calcular_saldo_ativo(a.id, db)
         resultado.append(AtivoComSaldo(
             id=a.id, nome=a.nome, categoria=a.categoria, ativo=a.ativo, saldo=saldo,
         ))
@@ -227,10 +245,11 @@ def editar_ativo(ativo_id: int, dados: AtivoUpdate, db: Session = Depends(get_db
     return a
 
 
-# ---------- Movimentações (com espelho automático no caixa) ----------
+# ---------- Movimentações (Aporte / Resgate) ----------
 
 def _criar_ou_atualizar_espelho(mov: MovimentacaoInvestimento, ativo: Ativo, db: Session):
-    if mov.tipo == "Rendimento":
+    """Aporte → despesa espelho; Resgate → receita espelho. Rendimento/Prejuízo não têm espelho."""
+    if mov.tipo in ("Rendimento", "Prejuízo"):
         if mov.transacao_id:
             espelho = db.query(Transacao).filter(Transacao.id == mov.transacao_id).first()
             if espelho:
@@ -266,8 +285,8 @@ def _criar_ou_atualizar_espelho(mov: MovimentacaoInvestimento, ativo: Ativo, db:
 
 @app.post("/movimentacoes", response_model=MovimentacaoOut)
 def criar_movimentacao(m: MovimentacaoCreate, db: Session = Depends(get_db)):
-    if m.tipo not in ("Aporte", "Rendimento", "Resgate"):
-        raise HTTPException(status_code=400, detail="Tipo inválido")
+    if m.tipo not in ("Aporte", "Resgate"):
+        raise HTTPException(status_code=400, detail="Tipo deve ser Aporte ou Resgate. Rendimento vem da atualização de saldo.")
     if m.valor <= 0:
         raise HTTPException(status_code=400, detail="Valor deve ser positivo")
     ativo = db.query(Ativo).filter(Ativo.id == m.ativo_id).first()
@@ -276,7 +295,7 @@ def criar_movimentacao(m: MovimentacaoCreate, db: Session = Depends(get_db)):
 
     nova = MovimentacaoInvestimento(
         ativo_id=m.ativo_id, data=m.data, tipo=m.tipo,
-        valor=abs(m.valor), observacao=m.observacao,
+        valor=abs(m.valor), observacao=m.observacao, automatica=False,
     )
     db.add(nova)
     db.flush()
@@ -299,9 +318,11 @@ def editar_movimentacao(mov_id: int, dados: MovimentacaoUpdate, db: Session = De
     m = db.query(MovimentacaoInvestimento).filter(MovimentacaoInvestimento.id == mov_id).first()
     if not m:
         raise HTTPException(status_code=404, detail="Movimentação não encontrada")
+    if m.automatica:
+        raise HTTPException(status_code=400, detail="Movimentações automáticas (Rendimento/Prejuízo) são geradas pela atualização de saldo e não podem ser editadas aqui.")
     alteracoes = dados.model_dump(exclude_unset=True)
-    if "tipo" in alteracoes and alteracoes["tipo"] not in (None, "Aporte", "Rendimento", "Resgate"):
-        raise HTTPException(status_code=400, detail="Tipo inválido")
+    if "tipo" in alteracoes and alteracoes["tipo"] not in (None, "Aporte", "Resgate"):
+        raise HTTPException(status_code=400, detail="Tipo deve ser Aporte ou Resgate")
     if "valor" in alteracoes and alteracoes["valor"] is not None:
         alteracoes["valor"] = abs(alteracoes["valor"])
     for campo, valor in alteracoes.items():
@@ -324,15 +345,90 @@ def resumo_movimentacoes_mes(ano: int, mes: int, db: Session = Depends(get_db)):
     aportes = sum(m.valor for m in movs if m.tipo == "Aporte")
     resgates = sum(m.valor for m in movs if m.tipo == "Resgate")
     rendimentos = sum(m.valor for m in movs if m.tipo == "Rendimento")
-    return ResumoInvestimentosMes(aportes=aportes, resgates=resgates, rendimentos=rendimentos)
+    prejuizos = sum(m.valor for m in movs if m.tipo == "Prejuízo")
+    return ResumoInvestimentosMes(aportes=aportes, resgates=resgates, rendimentos=rendimentos, prejuizos=prejuizos)
 
 
-# ---------- Saldo acumulado até o mês ----------
+# ---------- Atualização de saldo ----------
+
+@app.post("/atualizacoes-saldo", response_model=AtualizacaoSaldoOut)
+def criar_atualizacao_saldo(a: AtualizacaoSaldoCreate, db: Session = Depends(get_db)):
+    ativo = db.query(Ativo).filter(Ativo.id == a.ativo_id).first()
+    if not ativo:
+        raise HTTPException(status_code=404, detail="Ativo não encontrado")
+
+    # última atualização (antes desta)
+    ultima = (
+        db.query(AtualizacaoSaldo)
+        .filter(AtualizacaoSaldo.ativo_id == a.ativo_id)
+        .order_by(AtualizacaoSaldo.data.desc(), AtualizacaoSaldo.id.desc())
+        .first()
+    )
+
+    if ultima is None:
+        # primeira atualização = saldo inicial, sem cálculo de rendimento
+        nova = AtualizacaoSaldo(
+            ativo_id=a.ativo_id, data=a.data, saldo_informado=a.saldo_informado,
+            saldo_anterior=None, aportes_periodo=0, resgates_periodo=0,
+            rendimento_liquido=None, rendimento_percentual=None,
+        )
+        db.add(nova)
+        db.commit()
+        db.refresh(nova)
+        return nova
+
+    # cálculo do rendimento do período
+    movs = (
+        db.query(MovimentacaoInvestimento)
+        .filter(MovimentacaoInvestimento.ativo_id == a.ativo_id)
+        .filter(MovimentacaoInvestimento.data > ultima.data)
+        .filter(MovimentacaoInvestimento.data <= a.data)
+        .filter(MovimentacaoInvestimento.automatica == False)
+        .all()
+    )
+    aportes = sum(m.valor for m in movs if m.tipo == "Aporte")
+    resgates = sum(m.valor for m in movs if m.tipo == "Resgate")
+
+    rendimento = a.saldo_informado - ultima.saldo_informado - aportes + resgates
+    percentual = (rendimento / ultima.saldo_informado * 100) if ultima.saldo_informado > 0 else None
+
+    nova = AtualizacaoSaldo(
+        ativo_id=a.ativo_id, data=a.data, saldo_informado=a.saldo_informado,
+        saldo_anterior=ultima.saldo_informado, aportes_periodo=aportes, resgates_periodo=resgates,
+        rendimento_liquido=rendimento, rendimento_percentual=percentual,
+    )
+    db.add(nova)
+    db.flush()
+
+    # cria movimentação automática de Rendimento ou Prejuízo
+    if rendimento > 0:
+        db.add(MovimentacaoInvestimento(
+            ativo_id=a.ativo_id, data=a.data, tipo="Rendimento",
+            valor=abs(rendimento), observacao="Gerado por atualização de saldo", automatica=True,
+        ))
+    elif rendimento < 0:
+        db.add(MovimentacaoInvestimento(
+            ativo_id=a.ativo_id, data=a.data, tipo="Prejuízo",
+            valor=abs(rendimento), observacao="Gerado por atualização de saldo", automatica=True,
+        ))
+
+    db.commit()
+    db.refresh(nova)
+    return nova
+
+
+@app.get("/atualizacoes-saldo", response_model=List[AtualizacaoSaldoOut])
+def listar_atualizacoes_saldo(ativo_id: int | None = None, db: Session = Depends(get_db)):
+    q = db.query(AtualizacaoSaldo)
+    if ativo_id is not None:
+        q = q.filter(AtualizacaoSaldo.ativo_id == ativo_id)
+    return q.order_by(AtualizacaoSaldo.data.desc()).all()
+
+
+# ---------- Saldo acumulado do mês ----------
 
 @app.get("/saldo-acumulado/{ano}/{mes}", response_model=SaldoAcumulado)
 def saldo_acumulado_ate(ano: int, mes: int, db: Session = Depends(get_db)):
-    """Soma tudo desde o início até o fim do mês selecionado.
-    Aportes e resgates já entram como transações espelho, então não são contados de novo."""
     ultimo_dia = calendar.monthrange(ano, mes)[1]
     limite = date(ano, mes, ultimo_dia)
 
