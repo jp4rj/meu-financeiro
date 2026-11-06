@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import extract
 from typing import List
 from datetime import date
+from pydantic import BaseModel
 import calendar
 
 from .database import Base, engine, SessionLocal
@@ -30,6 +31,14 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+class SaldoAcumulado(BaseModel):
+    saldo: float
+    receitas: float
+    despesas: float
+    aportes: float
+    resgates: float
 
 
 # ---------- Transações ----------
@@ -221,8 +230,6 @@ def editar_ativo(ativo_id: int, dados: AtivoUpdate, db: Session = Depends(get_db
 # ---------- Movimentações (com espelho automático no caixa) ----------
 
 def _criar_ou_atualizar_espelho(mov: MovimentacaoInvestimento, ativo: Ativo, db: Session):
-    """Garante que a transação espelho no caixa reflita a movimentação."""
-    # Rendimento não gera espelho
     if mov.tipo == "Rendimento":
         if mov.transacao_id:
             espelho = db.query(Transacao).filter(Transacao.id == mov.transacao_id).first()
@@ -318,3 +325,27 @@ def resumo_movimentacoes_mes(ano: int, mes: int, db: Session = Depends(get_db)):
     resgates = sum(m.valor for m in movs if m.tipo == "Resgate")
     rendimentos = sum(m.valor for m in movs if m.tipo == "Rendimento")
     return ResumoInvestimentosMes(aportes=aportes, resgates=resgates, rendimentos=rendimentos)
+
+
+# ---------- Saldo acumulado até o mês ----------
+
+@app.get("/saldo-acumulado/{ano}/{mes}", response_model=SaldoAcumulado)
+def saldo_acumulado_ate(ano: int, mes: int, db: Session = Depends(get_db)):
+    """Soma tudo desde o início até o fim do mês selecionado.
+    Aportes e resgates já entram como transações espelho, então não são contados de novo."""
+    ultimo_dia = calendar.monthrange(ano, mes)[1]
+    limite = date(ano, mes, ultimo_dia)
+
+    trans = db.query(Transacao).filter(Transacao.data <= limite).all()
+    receitas = sum(t.valor for t in trans if t.valor > 0)
+    despesas = sum(abs(t.valor) for t in trans if t.valor < 0)
+
+    movs = db.query(MovimentacaoInvestimento).filter(MovimentacaoInvestimento.data <= limite).all()
+    aportes = sum(m.valor for m in movs if m.tipo == "Aporte")
+    resgates = sum(m.valor for m in movs if m.tipo == "Resgate")
+
+    saldo = receitas - despesas
+    return SaldoAcumulado(
+        saldo=saldo, receitas=receitas, despesas=despesas,
+        aportes=aportes, resgates=resgates,
+    )

@@ -1,7 +1,14 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import date
+from datetime import date, datetime
+from io import BytesIO
+
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
 API = "http://127.0.0.1:8000"
 
@@ -29,123 +36,195 @@ st.set_page_config(page_title="Meu Financeiro", layout="wide", page_icon="💰")
 # ---------- CSS customizado ----------
 st.markdown("""
 <style>
-    /* Fonte base maior e mais confortável */
-    html, body, [class*="css"] {
-        font-size: 17px;
-    }
-
-    /* Títulos */
-    h1 {
-        color: #1F6F8B;
-        font-size: 2.4rem !important;
-        font-weight: 700;
-        margin-bottom: 0.2rem !important;
-    }
-    h2 {
-        color: #1F6F8B;
-        font-size: 1.7rem !important;
-        margin-top: 1.2rem !important;
-    }
-    h3 {
-        font-size: 1.3rem !important;
-        margin-top: 1rem !important;
-    }
-
-    /* Cards de métrica com fundo branco e sombra */
+    html, body, [class*="css"] { font-size: 17px; }
+    h1 { color: #1F6F8B; font-size: 2.4rem !important; font-weight: 700; margin-bottom: 0.2rem !important; }
+    h2 { color: #1F6F8B; font-size: 1.7rem !important; margin-top: 1.2rem !important; }
+    h3 { font-size: 1.3rem !important; margin-top: 1rem !important; }
     [data-testid="stMetric"] {
-        background-color: #FFFFFF;
-        border-radius: 12px;
-        padding: 18px 20px;
-        box-shadow: 0 2px 8px rgba(31, 111, 139, 0.08);
-        border-left: 4px solid #1F6F8B;
+        background-color: #FFFFFF; border-radius: 12px; padding: 18px 20px;
+        box-shadow: 0 2px 8px rgba(31, 111, 139, 0.08); border-left: 4px solid #1F6F8B;
     }
-    [data-testid="stMetricLabel"] {
-        font-size: 0.95rem !important;
-        color: #5A6B75 !important;
-    }
-    [data-testid="stMetricValue"] {
-        font-size: 1.6rem !important;
-        color: #1A2B34 !important;
-    }
-
-    /* Abas */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 6px;
-    }
+    [data-testid="stMetricLabel"] { font-size: 0.95rem !important; color: #5A6B75 !important; }
+    [data-testid="stMetricValue"] { font-size: 1.6rem !important; color: #1A2B34 !important; }
+    .stTabs [data-baseweb="tab-list"] { gap: 6px; }
     .stTabs [data-baseweb="tab"] {
-        background-color: #FFFFFF;
-        border-radius: 8px 8px 0 0;
-        padding: 10px 18px;
-        font-size: 1rem;
-        font-weight: 500;
+        background-color: #FFFFFF; border-radius: 8px 8px 0 0;
+        padding: 10px 18px; font-size: 1rem; font-weight: 500;
     }
-    .stTabs [aria-selected="true"] {
-        background-color: #1F6F8B !important;
-        color: #FFFFFF !important;
-    }
-
-    /* Botões */
+    .stTabs [aria-selected="true"] { background-color: #1F6F8B !important; color: #FFFFFF !important; }
     .stButton > button {
-        background-color: #1F6F8B;
-        color: #FFFFFF;
-        border-radius: 8px;
-        border: none;
-        padding: 0.5rem 1.2rem;
-        font-weight: 600;
+        background-color: #1F6F8B; color: #FFFFFF; border-radius: 8px;
+        border: none; padding: 0.5rem 1.2rem; font-weight: 600;
     }
-    .stButton > button:hover {
-        background-color: #175466;
-        color: #FFFFFF;
-    }
-
-    /* Cards coloridos semânticos */
+    .stButton > button:hover { background-color: #175466; color: #FFFFFF; }
     .card-receita {
         background: linear-gradient(135deg, #E8F6EE 0%, #FFFFFF 100%);
-        border-left: 5px solid #2E9E5B;
-        border-radius: 12px;
-        padding: 16px 20px;
-        margin: 8px 0;
+        border-left: 5px solid #2E9E5B; border-radius: 12px; padding: 16px 20px; margin: 8px 0;
     }
     .card-despesa {
         background: linear-gradient(135deg, #FDECEA 0%, #FFFFFF 100%);
-        border-left: 5px solid #D9534F;
-        border-radius: 12px;
-        padding: 16px 20px;
-        margin: 8px 0;
+        border-left: 5px solid #D9534F; border-radius: 12px; padding: 16px 20px; margin: 8px 0;
     }
     .card-investimento {
         background: linear-gradient(135deg, #FBF3DA 0%, #FFFFFF 100%);
-        border-left: 5px solid #C9A227;
-        border-radius: 12px;
-        padding: 16px 20px;
-        margin: 8px 0;
+        border-left: 5px solid #C9A227; border-radius: 12px; padding: 16px 20px; margin: 8px 0;
     }
-    .card-label {
-        font-size: 0.9rem;
-        color: #5A6B75;
-        margin-bottom: 4px;
+    .card-neutro {
+        background: linear-gradient(135deg, #EEF3F7 0%, #FFFFFF 100%);
+        border-left: 5px solid #5A6B75; border-radius: 12px; padding: 16px 20px; margin: 8px 0;
     }
-    .card-value {
-        font-size: 1.5rem;
-        font-weight: 700;
-    }
+    .card-label { font-size: 0.9rem; color: #5A6B75; margin-bottom: 4px; }
+    .card-value { font-size: 1.5rem; font-weight: 700; }
     .card-receita .card-value { color: #2E9E5B; }
     .card-despesa .card-value { color: #D9534F; }
     .card-investimento .card-value { color: #C9A227; }
-
-    /* Dataframe mais leve */
-    [data-testid="stDataFrame"] {
-        border-radius: 8px;
-        overflow: hidden;
-    }
+    .card-neutro .card-value { color: #1A2B34; }
+    [data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ==================== GERAÇÃO DE PDF ====================
+
+def _tabela_padrao(linhas, cor_cabecalho, larguras, linhas_destaque=None):
+    t = Table(linhas, colWidths=larguras)
+    estilos = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(cor_cabecalho)),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FC")]),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D0D9E0")),
+    ]
+    if linhas_destaque:
+        for idx in linhas_destaque:
+            estilos.append(("BACKGROUND", (0, idx), (-1, idx), colors.HexColor("#FBF3DA")))
+            estilos.append(("FONTNAME", (0, idx), (-1, idx), "Helvetica-Bold"))
+    t.setStyle(TableStyle(estilos))
+    return t
+
+
+def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, movimentacoes_mes):
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        leftMargin=2 * cm, rightMargin=2 * cm,
+        topMargin=2 * cm, bottomMargin=2 * cm,
+        title=f"Resumo Financeiro {mes:02d}/{ano}",
+    )
+
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        name="H1Custom", parent=styles["Heading1"],
+        textColor=colors.HexColor("#1F6F8B"), fontSize=18, spaceAfter=8,
+    ))
+    styles.add(ParagraphStyle(
+        name="H2Custom", parent=styles["Heading2"],
+        textColor=colors.HexColor("#1F6F8B"), fontSize=13, spaceBefore=12, spaceAfter=6,
+    ))
+    styles.add(ParagraphStyle(
+        name="Sub", parent=styles["Normal"],
+        textColor=colors.HexColor("#5A6B75"), fontSize=9, spaceAfter=4,
+    ))
+
+    story = []
+    meses_nome = ["", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+                  "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+
+    story.append(Paragraph(f"Resumo Financeiro — {meses_nome[mes]} de {ano}", styles["H1Custom"]))
+    story.append(Paragraph(f"Gerado em {datetime.now().strftime('%d/%m/%Y às %H:%M')}", styles["Sub"]))
+    story.append(Spacer(1, 12))
+
+    # ---- Totais do mês ----
+    story.append(Paragraph("Totais do mês", styles["H2Custom"]))
+    df = pd.DataFrame(transacoes) if transacoes else pd.DataFrame()
+    total_rec = df[df["valor"] > 0]["valor"].sum() if not df.empty else 0
+    total_desp = df[df["valor"] < 0]["valor"].sum() if not df.empty else 0
+
+    dados_totais = [
+        ["Item", "Valor"],
+        ["Receitas do mês", f"R$ {total_rec:,.2f}"],
+        ["Despesas do mês", f"R$ {abs(total_desp):,.2f}"],
+        ["Aportes do mês", f"R$ {resumo_inv.get('aportes', 0):,.2f}"],
+        ["Resgates do mês", f"R$ {resumo_inv.get('resgates', 0):,.2f}"],
+        ["Rendimentos do mês", f"R$ {resumo_inv.get('rendimentos', 0):,.2f}"],
+        ["Saldo vindo do mês anterior", f"R$ {saldo_ant:,.2f}"],
+        ["Saldo atual (acumulado)", f"R$ {saldo_atual:,.2f}"],
+    ]
+    story.append(_tabela_padrao(dados_totais, "#1F6F8B", [9 * cm, 6 * cm],
+                                linhas_destaque=[len(dados_totais) - 1]))
+    story.append(Spacer(1, 14))
+
+    # ---- Despesas ----
+    story.append(Paragraph("Despesas do mês", styles["H2Custom"]))
+    desp = [t for t in transacoes if t["valor"] < 0] if transacoes else []
+    if not desp:
+        story.append(Paragraph("Nenhuma despesa neste mês.", styles["Normal"]))
+    else:
+        linhas = [["Data", "Descrição", "Categoria", "Tipo", "Valor"]]
+        for t in sorted(desp, key=lambda x: x["data"]):
+            data_br = datetime.strptime(t["data"], "%Y-%m-%d").strftime("%d/%m/%Y")
+            linhas.append([data_br, t["descricao"][:40], t["categoria"], t["tipo"], f"R$ {abs(t['valor']):,.2f}"])
+        story.append(_tabela_padrao(linhas, "#D9534F", [2.2 * cm, 5.5 * cm, 3.5 * cm, 2 * cm, 2.3 * cm]))
+    story.append(Spacer(1, 14))
+
+    # ---- Receitas ----
+    story.append(Paragraph("Receitas do mês", styles["H2Custom"]))
+    rec = [t for t in transacoes if t["valor"] > 0] if transacoes else []
+    if not rec:
+        story.append(Paragraph("Nenhuma receita neste mês.", styles["Normal"]))
+    else:
+        linhas = [["Data", "Descrição", "Categoria", "Tipo", "Valor"]]
+        for t in sorted(rec, key=lambda x: x["data"]):
+            data_br = datetime.strptime(t["data"], "%Y-%m-%d").strftime("%d/%m/%Y")
+            linhas.append([data_br, t["descricao"][:40], t["categoria"], t["tipo"], f"R$ {t['valor']:,.2f}"])
+        story.append(_tabela_padrao(linhas, "#2E9E5B", [2.2 * cm, 5.5 * cm, 3.5 * cm, 2 * cm, 2.3 * cm]))
+    story.append(Spacer(1, 14))
+
+    # ---- Investimentos: posição ----
+    story.append(Paragraph("Posição de investimentos", styles["H2Custom"]))
+    if not ativos:
+        story.append(Paragraph("Nenhum ativo cadastrado.", styles["Normal"]))
+    else:
+        linhas = [["Ativo", "Categoria", "Saldo"]]
+        total_inv = 0
+        for a in ativos:
+            linhas.append([a["nome"], a["categoria"], f"R$ {a['saldo']:,.2f}"])
+            total_inv += a["saldo"]
+        linhas.append(["TOTAL", "", f"R$ {total_inv:,.2f}"])
+        story.append(_tabela_padrao(linhas, "#C9A227", [8 * cm, 4.5 * cm, 3 * cm],
+                                     linhas_destaque=[len(linhas) - 1]))
+    story.append(Spacer(1, 14))
+
+    # ---- Investimentos: movimentações do mês ----
+    story.append(Paragraph("Movimentações de investimento no mês", styles["H2Custom"]))
+    if not movimentacoes_mes:
+        story.append(Paragraph("Nenhuma movimentação de investimento neste mês.", styles["Normal"]))
+    else:
+        mapa_ativos = {a["id"]: a["nome"] for a in ativos}
+        linhas = [["Data", "Ativo", "Tipo", "Valor", "Observação"]]
+        for m in sorted(movimentacoes_mes, key=lambda x: x["data"]):
+            data_br = datetime.strptime(m["data"], "%Y-%m-%d").strftime("%d/%m/%Y")
+            nome = mapa_ativos.get(m["ativo_id"], f"Ativo {m['ativo_id']}")
+            obs = (m.get("observacao") or "")[:25]
+            linhas.append([data_br, nome[:30], m["tipo"], f"R$ {m['valor']:,.2f}", obs])
+        story.append(_tabela_padrao(linhas, "#C9A227", [2.2 * cm, 5 * cm, 2.5 * cm, 2.5 * cm, 3.3 * cm]))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+# ==================== INÍCIO DO APP ====================
 
 st.title("💰 Meu Financeiro")
 st.caption("Controle de gastos, despesas fixas, investimentos e parcelamentos")
 
-aba_lancar, aba_mes, aba_graficos, aba_recorrentes, aba_invest = st.tabs(
-    ["➕ Lançar", "📊 Resumo do mês", "📈 Gráficos", "🔁 Recorrentes", "💼 Investimentos"]
+aba_lancar, aba_mes, aba_graficos, aba_recorrentes, aba_invest, aba_relatorios = st.tabs(
+    ["➕ Lançar", "📊 Resumo do mês", "📈 Gráficos", "🔁 Recorrentes", "💼 Investimentos", "📄 Relatórios"]
 )
 
 # ============ ABA LANÇAR ============
@@ -185,13 +264,22 @@ with aba_lancar:
             categoria = st.selectbox("Categoria", categorias)
             enviar = st.form_submit_button("Lançar")
 
-            if enviar and descricao and valor > 0:
-                valor_final = -valor if natureza == "Despesa" else valor
-                requests.post(f"{API}/transacoes", json={
-                    "data": str(data), "descricao": descricao, "valor": valor_final,
-                    "categoria": categoria, "tipo": tipo, "recorrente": False,
-                })
-                st.success("Lançado!")
+            if enviar:
+                if not descricao or valor <= 0:
+                    st.warning("Preencha descrição e valor antes de lançar.")
+                else:
+                    valor_final = -valor if natureza == "Despesa" else valor
+                    r = requests.post(f"{API}/transacoes", json={
+                        "data": str(data), "descricao": descricao, "valor": valor_final,
+                        "categoria": categoria, "tipo": tipo, "recorrente": False,
+                    })
+                    if r.status_code == 200:
+                        st.toast(
+                            f"Lançamento de R$ {valor:,.2f} ({descricao}, {data.strftime('%d/%m/%Y')}) efetivado.",
+                            icon="✅",
+                        )
+                    else:
+                        st.error(f"Erro ao salvar: {r.text}")
     else:
         with st.form("form_parcelada"):
             data = st.date_input("Data da 1ª parcela", value=date.today(), format="DD/MM/YYYY")
@@ -201,13 +289,22 @@ with aba_lancar:
             categoria = st.selectbox("Categoria", categorias)
             enviar = st.form_submit_button("Lançar parcelado")
 
-            if enviar and descricao and valor_total > 0:
-                requests.post(f"{API}/parcelamentos", json={
-                    "descricao": descricao, "valor_total": valor_total,
-                    "categoria": categoria, "tipo": tipo,
-                    "data_primeira_parcela": str(data), "num_parcelas": int(num_parcelas),
-                })
-                st.success(f"{int(num_parcelas)} parcelas criadas.")
+            if enviar:
+                if not descricao or valor_total <= 0:
+                    st.warning("Preencha descrição e valor antes de lançar.")
+                else:
+                    r = requests.post(f"{API}/parcelamentos", json={
+                        "descricao": descricao, "valor_total": valor_total,
+                        "categoria": categoria, "tipo": tipo,
+                        "data_primeira_parcela": str(data), "num_parcelas": int(num_parcelas),
+                    })
+                    if r.status_code == 200:
+                        st.toast(
+                            f"Parcelamento de R$ {valor_total:,.2f} em {int(num_parcelas)}x ({descricao}) efetivado.",
+                            icon="✅",
+                        )
+                    else:
+                        st.error(f"Erro ao salvar: {r.text}")
 
 # ============ ABA RESUMO DO MÊS ============
 with aba_mes:
@@ -220,6 +317,11 @@ with aba_mes:
 
     dados = requests.get(f"{API}/transacoes/mes/{int(ano)}/{int(mes)}").json()
     resumo_inv = requests.get(f"{API}/movimentacoes/mes/{int(ano)}/{int(mes)}").json()
+    acumulado = requests.get(f"{API}/saldo-acumulado/{int(ano)}/{int(mes)}").json()
+
+    ano_ant = int(ano) - 1 if int(mes) == 1 else int(ano)
+    mes_ant = 12 if int(mes) == 1 else int(mes) - 1
+    acumulado_ant = requests.get(f"{API}/saldo-acumulado/{ano_ant}/{mes_ant}").json()
 
     if not dados and not resumo_inv:
         st.info("Nenhuma transação neste mês.")
@@ -237,38 +339,50 @@ with aba_mes:
         resgates = resumo_inv.get("resgates", 0)
         rendimentos = resumo_inv.get("rendimentos", 0)
 
-        saldo_caixa = total_rec - abs(total_desp)
+        saldo_anterior = acumulado_ant.get("saldo", 0)
+        saldo_atual = acumulado.get("saldo", 0)
 
-        # Cards coloridos
-        c1, c2, c3, c4 = st.columns(4)
+        st.markdown("##### O que aconteceu neste mês")
+        c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown(f"""
-            <div class="card-despesa">
-                <div class="card-label">🔴 Despesas</div>
-                <div class="card-value">R$ {abs(total_desp):,.2f}</div>
+            <div class="card-receita">
+                <div class="card-label">🟢 Receitas do mês</div>
+                <div class="card-value">R$ {total_rec:,.2f}</div>
             </div>
             """, unsafe_allow_html=True)
         with c2:
             st.markdown(f"""
-            <div class="card-receita">
-                <div class="card-label">🟢 Receitas</div>
-                <div class="card-value">R$ {total_rec:,.2f}</div>
+            <div class="card-despesa">
+                <div class="card-label">🔴 Despesas do mês</div>
+                <div class="card-value">R$ {abs(total_desp):,.2f}</div>
             </div>
             """, unsafe_allow_html=True)
         with c3:
             st.markdown(f"""
             <div class="card-investimento">
-                <div class="card-label">🟡 Aportes</div>
+                <div class="card-label">🟡 Aportes do mês</div>
                 <div class="card-value">R$ {aportes:,.2f}</div>
             </div>
             """, unsafe_allow_html=True)
+
+        st.markdown("##### Evolução do caixa")
+        c4, c5 = st.columns(2)
         with c4:
-            cor_saldo = "card-receita" if saldo_caixa >= 0 else "card-despesa"
-            sinal = "" if saldo_caixa >= 0 else "-"
+            sinal_ant = "" if saldo_anterior >= 0 else "-"
             st.markdown(f"""
-            <div class="{cor_saldo}">
-                <div class="card-label">💰 Saldo em caixa</div>
-                <div class="card-value">{sinal}R$ {abs(saldo_caixa):,.2f}</div>
+            <div class="card-neutro">
+                <div class="card-label">📥 Saldo vindo do mês anterior</div>
+                <div class="card-value">{sinal_ant}R$ {abs(saldo_anterior):,.2f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with c5:
+            cor_atual = "card-receita" if saldo_atual >= 0 else "card-despesa"
+            sinal_at = "" if saldo_atual >= 0 else "-"
+            st.markdown(f"""
+            <div class="{cor_atual}">
+                <div class="card-label">💰 Saldo atual (acumulado)</div>
+                <div class="card-value">{sinal_at}R$ {abs(saldo_atual):,.2f}</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -287,7 +401,6 @@ with aba_mes:
             st.info("Nenhuma despesa neste mês.")
         else:
             st.write(f"**Total: R$ {abs(total_desp):,.2f}**")
-
             st.write("**Total por tipo:**")
             nomes_tipo = {"Fixo": "Fixo", "Cartao": "Cartão", "Extra": "Extra", "Investimento": "Investimento"}
             por_tipo = df_desp.groupby("tipo")["valor"].sum().reset_index()
@@ -327,7 +440,7 @@ with aba_mes:
                     }
                     if any(str(payload[k]) != str(original[k]) for k in payload if k != "recorrente"):
                         requests.put(f"{API}/transacoes/{tid}", json=payload)
-                st.success("Alterações de despesas salvas.")
+                st.toast("Alterações de despesas salvas.", icon="✅")
                 st.rerun()
 
         st.divider()
@@ -337,7 +450,6 @@ with aba_mes:
             st.info("Nenhuma receita neste mês.")
         else:
             st.write(f"**Total: R$ {total_rec:,.2f}**")
-
             st.write("**Receitas (edite selecionando uma linha):**")
             df_edit_r = df_rec.copy()
             df_edit_r["data_br"] = pd.to_datetime(df_edit_r["data"]).dt.strftime("%d-%m-%Y")
@@ -368,7 +480,7 @@ with aba_mes:
                     }
                     if any(str(payload[k]) != str(original[k]) for k in payload if k != "recorrente"):
                         requests.put(f"{API}/transacoes/{tid}", json=payload)
-                st.success("Alterações de receitas salvas.")
+                st.toast("Alterações de receitas salvas.", icon="✅")
                 st.rerun()
 
 # ============ ABA GRÁFICOS ============
@@ -435,7 +547,7 @@ with aba_recorrentes:
                 "descricao": descricao, "valor": valor, "categoria": categoria,
                 "natureza": natureza_r, "dia_vencimento": int(dia),
             })
-            st.success("Recorrente cadastrado.")
+            st.toast(f"Recorrente '{descricao}' cadastrado.", icon="✅")
             st.rerun()
 
     st.write("**Cadastrados:**")
@@ -467,7 +579,7 @@ with aba_recorrentes:
                 }
                 if any(str(payload[k]) != str(original[k]) for k in payload):
                     requests.put(f"{API}/recorrentes/{rid}", json=payload)
-            st.success("Alterações salvas.")
+            st.toast("Alterações salvas.", icon="✅")
             st.rerun()
 
 # ============ ABA INVESTIMENTOS ============
@@ -482,7 +594,7 @@ with aba_invest:
 
             if criar_ativo_btn and nome_ativo:
                 requests.post(f"{API}/ativos", json={"nome": nome_ativo, "categoria": categoria_ativo})
-                st.success("Ativo cadastrado.")
+                st.toast(f"Ativo '{nome_ativo}' cadastrado.", icon="✅")
                 st.rerun()
 
     ativos = requests.get(f"{API}/ativos").json()
@@ -523,7 +635,10 @@ with aba_invest:
                     "valor": valor_mov,
                     "observacao": obs_mov if obs_mov else None,
                 })
-                st.success("Movimentação lançada.")
+                st.toast(
+                    f"{tipo_mov} de R$ {valor_mov:,.2f} em '{ativo_sel}' efetivado.",
+                    icon="✅",
+                )
                 st.rerun()
 
         st.divider()
@@ -565,5 +680,57 @@ with aba_invest:
                     }
                     if any(str(payload[k]) != str(original[k]) for k in ["data", "tipo", "valor", "observacao"]):
                         requests.put(f"{API}/movimentacoes/{mid}", json=payload)
-                st.success("Alterações salvas.")
+                st.toast("Alterações salvas.", icon="✅")
                 st.rerun()
+
+# ============ ABA RELATÓRIOS ============
+with aba_relatorios:
+    st.subheader("Relatórios em PDF")
+    st.caption("Gera um PDF completo do mês: totais, despesas, receitas, posição e movimentações de investimentos.")
+
+    hoje = date.today()
+    col1, col2 = st.columns(2)
+    ano_r = col1.number_input("Ano (relatório)", min_value=2020, max_value=2100, value=hoje.year, step=1, key="ano_rel")
+    mes_r = col2.number_input("Mês (relatório)", min_value=1, max_value=12, value=hoje.month, step=1, key="mes_rel")
+
+    if st.button("Gerar PDF do resumo"):
+        dados_r = requests.get(f"{API}/transacoes/mes/{int(ano_r)}/{int(mes_r)}").json()
+        resumo_inv_r = requests.get(f"{API}/movimentacoes/mes/{int(ano_r)}/{int(mes_r)}").json()
+        acumulado_r = requests.get(f"{API}/saldo-acumulado/{int(ano_r)}/{int(mes_r)}").json()
+
+        ano_ant_r = int(ano_r) - 1 if int(mes_r) == 1 else int(ano_r)
+        mes_ant_r = 12 if int(mes_r) == 1 else int(mes_r) - 1
+        acumulado_ant_r = requests.get(f"{API}/saldo-acumulado/{ano_ant_r}/{mes_ant_r}").json()
+
+        ativos_r = requests.get(f"{API}/ativos").json()
+
+        # Buscar movimentações de investimento do mês (todos os ativos)
+        movs_mes = []
+        for a in ativos_r:
+            movs_ativo = requests.get(f"{API}/movimentacoes?ativo_id={a['id']}").json()
+            for m in movs_ativo:
+                try:
+                    d = datetime.strptime(m["data"], "%Y-%m-%d")
+                    if d.year == int(ano_r) and d.month == int(mes_r):
+                        movs_mes.append(m)
+                except Exception:
+                    pass
+
+        if not dados_r and not resumo_inv_r and not movs_mes:
+            st.warning("Nenhum dado neste mês para gerar o relatório.")
+        else:
+            pdf_bytes = gerar_pdf(
+                ano=int(ano_r), mes=int(mes_r),
+                transacoes=dados_r,
+                resumo_inv=resumo_inv_r,
+                saldo_ant=acumulado_ant_r.get("saldo", 0),
+                saldo_atual=acumulado_r.get("saldo", 0),
+                ativos=ativos_r,
+                movimentacoes_mes=movs_mes,
+            )
+            st.download_button(
+                label="⬇️ Baixar PDF",
+                data=pdf_bytes,
+                file_name=f"resumo_{int(ano_r)}_{int(mes_r):02d}.pdf",
+                mime="application/pdf",
+            )
