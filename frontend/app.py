@@ -69,7 +69,6 @@ TIPOS_MOV = ["Aporte", "Resgate"]
 MESES_ABREV = ["", "Jan", "Fev", "Mar", "Abr", "Mai", "Jun",
                "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
 
-# normaliza tipos antigos para exibição consistente
 NOMES_TIPO = {
     "Cartao": "Cartão",
     "Cartão": "Cartão",
@@ -285,13 +284,14 @@ def grafico_evolucao_patrimonio(pontos, largura=15 * cm, altura=7 * cm):
     return d
 
 
-def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, movimentacoes_mes):
+def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, movimentacoes_mes, senha_pdf):
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=A4,
         leftMargin=2 * cm, rightMargin=2 * cm,
         topMargin=2 * cm, bottomMargin=2 * cm,
         title=f"Resumo Financeiro {mes:02d}/{ano}",
+        encrypt=senha_pdf,
     )
 
     styles = getSampleStyleSheet()
@@ -564,7 +564,6 @@ with aba_mes:
             df["data"] = pd.to_datetime(df["data"]).dt.date
             df["tipo"] = df["tipo"].apply(lambda x: NOMES_TIPO.get(x, x))
 
-        # Totais do mês (sempre do mês inteiro, não filtrados)
         total_desp = df[df["valor"] < 0]["valor"].sum() if not df.empty else 0
         total_rec = df[df["valor"] > 0]["valor"].sum() if not df.empty else 0
         aportes = resumo_inv.get("aportes", 0)
@@ -631,7 +630,6 @@ with aba_mes:
 
         st.divider()
 
-        # ---------- Filtros (recolhidos, expandem ao clicar) ----------
         filtro_ativo = False
         cats_sel = []
         tipos_sel = []
@@ -672,7 +670,6 @@ with aba_mes:
             df_desp = df_filtrado[df_filtrado["valor"] < 0].copy() if not df_filtrado.empty else pd.DataFrame()
             df_rec = df_filtrado[df_filtrado["valor"] > 0].copy() if not df_filtrado.empty else pd.DataFrame()
 
-            # Total por tipo (só aparece dentro do expander)
             if not df_desp.empty:
                 st.write("**Total de despesas por tipo (filtrado):**")
                 por_tipo = df_desp.groupby("tipo")["valor"].sum().reset_index()
@@ -908,7 +905,7 @@ with aba_invest:
 
             if enviar_u and saldo_u >= 0:
                 r = requests.post(f"{API}/atualizacoes-saldo", json={
-                    "ativo_id": nomes_ativos[ativo_sel_u],
+                    "ativo_id": nomes_ativos[ativo_u] if False else nomes_ativos[ativo_sel_u],
                     "data": str(data_u),
                     "saldo_informado": saldo_u,
                 })
@@ -1040,46 +1037,57 @@ with aba_relatorios:
     ano_r = col1.number_input("Ano (relatório)", min_value=2020, max_value=2100, value=hoje.year, step=1, key="ano_rel")
     mes_r = col2.number_input("Mês (relatório)", min_value=1, max_value=12, value=hoje.month, step=1, key="mes_rel")
 
+    senha_pdf = st.text_input(
+        "Senha para proteger o PDF (obrigatória)",
+        type="password",
+        key="senha_pdf_relatorio",
+        help="O PDF será criptografado com esta senha. Guarde-a, pois sem ela o arquivo não abre.",
+    )
+
     if st.button("Gerar PDF do resumo"):
-        dados_r = requests.get(f"{API}/transacoes/mes/{int(ano_r)}/{int(mes_r)}").json()
-        resumo_inv_r = requests.get(f"{API}/movimentacoes/mes/{int(ano_r)}/{int(mes_r)}").json()
-        acumulado_r = requests.get(f"{API}/saldo-acumulado/{int(ano_r)}/{int(mes_r)}").json()
-
-        ano_ant_r = int(ano_r) - 1 if int(mes_r) == 1 else int(ano_r)
-        mes_ant_r = 12 if int(mes_r) == 1 else int(mes_r) - 1
-        acumulado_ant_r = requests.get(f"{API}/saldo-acumulado/{ano_ant_r}/{mes_ant_r}").json()
-
-        ativos_r = requests.get(f"{API}/ativos").json()
-
-        movs_mes = []
-        for a in ativos_r:
-            movs_ativo = requests.get(f"{API}/movimentacoes?ativo_id={a['id']}").json()
-            for m in movs_ativo:
-                try:
-                    d = datetime.strptime(m["data"], "%Y-%m-%d")
-                    if d.year == int(ano_r) and d.month == int(mes_r):
-                        movs_mes.append(m)
-                except Exception:
-                    pass
-
-        if not dados_r and not resumo_inv_r and not movs_mes:
-            st.warning("Nenhum dado neste mês para gerar o relatório.")
+        if not senha_pdf:
+            st.error("Digite uma senha para proteger o PDF antes de gerar.")
         else:
-            pdf_bytes = gerar_pdf(
-                ano=int(ano_r), mes=int(mes_r),
-                transacoes=dados_r,
-                resumo_inv=resumo_inv_r,
-                saldo_ant=acumulado_ant_r.get("saldo", 0),
-                saldo_atual=acumulado_r.get("saldo", 0),
-                ativos=ativos_r,
-                movimentacoes_mes=movs_mes,
-            )
-            st.download_button(
-                label="⬇️ Baixar PDF",
-                data=pdf_bytes,
-                file_name=f"resumo_{int(ano_r)}_{int(mes_r):02d}.pdf",
-                mime="application/pdf",
-            )
+            dados_r = requests.get(f"{API}/transacoes/mes/{int(ano_r)}/{int(mes_r)}").json()
+            resumo_inv_r = requests.get(f"{API}/movimentacoes/mes/{int(ano_r)}/{int(mes_r)}").json()
+            acumulado_r = requests.get(f"{API}/saldo-acumulado/{int(ano_r)}/{int(mes_r)}").json()
+
+            ano_ant_r = int(ano_r) - 1 if int(mes_r) == 1 else int(ano_r)
+            mes_ant_r = 12 if int(mes_r) == 1 else int(mes_r) - 1
+            acumulado_ant_r = requests.get(f"{API}/saldo-acumulado/{ano_ant_r}/{mes_ant_r}").json()
+
+            ativos_r = requests.get(f"{API}/ativos").json()
+
+            movs_mes = []
+            for a in ativos_r:
+                movs_ativo = requests.get(f"{API}/movimentacoes?ativo_id={a['id']}").json()
+                for m in movs_ativo:
+                    try:
+                        d = datetime.strptime(m["data"], "%Y-%m-%d")
+                        if d.year == int(ano_r) and d.month == int(mes_r):
+                            movs_mes.append(m)
+                    except Exception:
+                        pass
+
+            if not dados_r and not resumo_inv_r and not movs_mes:
+                st.warning("Nenhum dado neste mês para gerar o relatório.")
+            else:
+                pdf_bytes = gerar_pdf(
+                    ano=int(ano_r), mes=int(mes_r),
+                    transacoes=dados_r,
+                    resumo_inv=resumo_inv_r,
+                    saldo_ant=acumulado_ant_r.get("saldo", 0),
+                    saldo_atual=acumulado_r.get("saldo", 0),
+                    ativos=ativos_r,
+                    movimentacoes_mes=movs_mes,
+                    senha_pdf=senha_pdf,
+                )
+                st.download_button(
+                    label="⬇️ Baixar PDF",
+                    data=pdf_bytes,
+                    file_name=f"resumo_{int(ano_r)}_{int(mes_r):02d}.pdf",
+                    mime="application/pdf",
+                )
 
 # ============ ABA BACKUP ============
 with aba_backup:
