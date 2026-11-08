@@ -14,6 +14,10 @@ from reportlab.graphics.shapes import Drawing, String
 from reportlab.graphics.charts.barcharts import HorizontalBarChart
 from reportlab.graphics.charts.linecharts import HorizontalLineChart
 
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+import msoffcrypto
+
 import keyring
 import bcrypt
 
@@ -134,7 +138,49 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ==================== HELPERS DE PDF ====================
+# ==================== VERIFICAÇÃO DE ATUALIZAÇÃO DE SALDO ====================
+
+if "lembrete_visto" not in st.session_state:
+    st.session_state.lembrete_visto = False
+
+if not st.session_state.lembrete_visto:
+    ativos = requests.get(f"{API}/ativos").json()
+    hoje = date.today()
+    pendentes = []
+
+    for a in ativos:
+        if a["saldo"] <= 0:
+            continue
+        atualizacoes = requests.get(f"{API}/atualizacoes-saldo?ativo_id={a['id']}").json()
+        if not atualizacoes:
+            pendentes.append((a["nome"], None))
+            continue
+        ultima_data = max(
+            datetime.strptime(u["data"], "%Y-%m-%d").date() for u in atualizacoes
+        )
+        dias = (hoje - ultima_data).days
+        if dias > 30:
+            pendentes.append((a["nome"], dias))
+
+    if pendentes:
+        st.title("⚠️ Lembrete de atualização de saldo")
+        st.caption("Os ativos abaixo estão há mais de 30 dias sem atualização de saldo. O rendimento pode estar desatualizado.")
+        st.divider()
+
+        for nome, dias in pendentes:
+            if dias is None:
+                st.warning(f"**{nome}** — nunca teve o saldo atualizado.")
+            else:
+                st.warning(f"**{nome}** — última atualização há **{dias} dias**.")
+
+        st.divider()
+        if st.button("Continuar para o app", type="primary"):
+            st.session_state.lembrete_visto = True
+            st.rerun()
+        st.stop()
+
+
+# ==================== GERAÇÃO DE PDF ====================
 
 def _tabela_padrao(linhas, cor_cabecalho, larguras, linhas_destaque=None):
     t = Table(linhas, colWidths=larguras)
@@ -448,6 +494,90 @@ def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, 
     doc.build(story)
     buffer.seek(0)
     return buffer.getvalue()
+
+
+# ==================== GERAÇÃO DE EXCEL ====================
+
+def _estilizar_cabecalho(ws, cor_hex):
+    fill = PatternFill("solid", fgColor=cor_hex)
+    font = Font(bold=True, color="FFFFFF")
+    for cell in ws[1]:
+        cell.fill = fill
+        cell.font = font
+        cell.alignment = Alignment(horizontal="center")
+
+
+def gerar_excel(ano, mes, transacoes, ativos, recorrentes, senha_excel):
+    wb = Workbook()
+
+    # --- Aba Transações ---
+    ws1 = wb.active
+    ws1.title = "Transações"
+    ws1.append(["Data", "Descrição", "Categoria", "Tipo", "Valor (R$)"])
+    for t in sorted(transacoes, key=lambda x: x["data"]):
+        data_br = datetime.strptime(t["data"], "%Y-%m-%d").strftime("%d/%m/%Y")
+        tipo_nome = NOMES_TIPO.get(t["tipo"], t["tipo"])
+        ws1.append([data_br, t["descricao"], t["categoria"], tipo_nome, t["valor"]])
+    _estilizar_cabecalho(ws1, "1F6F8B")
+    ws1.column_dimensions["A"].width = 12
+    ws1.column_dimensions["B"].width = 40
+    ws1.column_dimensions["C"].width = 28
+    ws1.column_dimensions["D"].width = 20
+    ws1.column_dimensions["E"].width = 15
+    for row in ws1.iter_rows(min_row=2, min_col=5, max_col=5):
+        for cell in row:
+            cell.number_format = '#,##0.00'
+
+    # --- Aba Investimentos ---
+    ws2 = wb.create_sheet("Investimentos")
+    ws2.append(["Ativo", "Categoria", "Saldo (R$)"])
+    total_inv = 0
+    for a in ativos:
+        ws2.append([a["nome"], a["categoria"], a["saldo"]])
+        total_inv += a["saldo"]
+    ws2.append(["TOTAL", "", total_inv])
+    _estilizar_cabecalho(ws2, "C9A227")
+    ws2.column_dimensions["A"].width = 30
+    ws2.column_dimensions["B"].width = 22
+    ws2.column_dimensions["C"].width = 15
+    for row in ws2.iter_rows(min_row=2, min_col=3, max_col=3):
+        for cell in row:
+            cell.number_format = '#,##0.00'
+    # destaca a linha TOTAL
+    ultima = ws2.max_row
+    for cell in ws2[ultima]:
+        cell.font = Font(bold=True)
+
+    # --- Aba Recorrentes ---
+    ws3 = wb.create_sheet("Recorrentes")
+    ws3.append(["Descrição", "Valor (R$)", "Categoria", "Natureza", "Dia Vencimento", "Ativa"])
+    for r in recorrentes:
+        ws3.append([
+            r["descricao"], abs(r["valor"]), r["categoria"],
+            r["natureza"], r["dia_vencimento"], "Sim" if r["ativa"] else "Não",
+        ])
+    _estilizar_cabecalho(ws3, "2E9E5B")
+    ws3.column_dimensions["A"].width = 35
+    ws3.column_dimensions["B"].width = 15
+    ws3.column_dimensions["C"].width = 28
+    ws3.column_dimensions["D"].width = 12
+    ws3.column_dimensions["E"].width = 15
+    ws3.column_dimensions["F"].width = 10
+    for row in ws3.iter_rows(min_row=2, min_col=2, max_col=2):
+        for cell in row:
+            cell.number_format = '#,##0.00'
+
+    # Salva em memória
+    buffer_excel = BytesIO()
+    wb.save(buffer_excel)
+    buffer_excel.seek(0)
+
+    # Criptografa com msoffcrypto
+    buffer_cripto = BytesIO()
+    arquivo_office = msoffcrypto.OfficeFile(buffer_excel)
+    arquivo_office.encrypt(senha_excel, buffer_cripto)
+    buffer_cripto.seek(0)
+    return buffer_cripto.getvalue()
 
 
 # ==================== INÍCIO DO APP ====================
@@ -905,7 +1035,7 @@ with aba_invest:
 
             if enviar_u and saldo_u >= 0:
                 r = requests.post(f"{API}/atualizacoes-saldo", json={
-                    "ativo_id": nomes_ativos[ativo_u] if False else nomes_ativos[ativo_sel_u],
+                    "ativo_id": nomes_ativos[ativo_sel_u],
                     "data": str(data_u),
                     "saldo_informado": saldo_u,
                 })
@@ -1029,65 +1159,104 @@ with aba_invest:
 
 # ============ ABA RELATÓRIOS ============
 with aba_relatorios:
-    st.subheader("Relatórios em PDF")
-    st.caption("Gera um PDF completo do mês: totais, despesas, receitas, posição e movimentações de investimentos, rendimento da carteira e gráficos.")
+    st.subheader("Relatórios")
+    st.caption("Gere o resumo do mês em PDF ou Excel. Ambos são protegidos pela mesma senha.")
 
     hoje = date.today()
     col1, col2 = st.columns(2)
     ano_r = col1.number_input("Ano (relatório)", min_value=2020, max_value=2100, value=hoje.year, step=1, key="ano_rel")
     mes_r = col2.number_input("Mês (relatório)", min_value=1, max_value=12, value=hoje.month, step=1, key="mes_rel")
 
-    senha_pdf = st.text_input(
-        "Senha para proteger o PDF (obrigatória)",
+    senha_arquivo = st.text_input(
+        "Senha para proteger o arquivo (obrigatória — usada no PDF e no Excel)",
         type="password",
-        key="senha_pdf_relatorio",
-        help="O PDF será criptografado com esta senha. Guarde-a, pois sem ela o arquivo não abre.",
+        key="senha_arquivo_relatorio",
+        help="O arquivo será criptografado com esta senha. Guarde-a, pois sem ela o arquivo não abre.",
     )
 
-    if st.button("Gerar PDF do resumo"):
-        if not senha_pdf:
-            st.error("Digite uma senha para proteger o PDF antes de gerar.")
-        else:
-            dados_r = requests.get(f"{API}/transacoes/mes/{int(ano_r)}/{int(mes_r)}").json()
-            resumo_inv_r = requests.get(f"{API}/movimentacoes/mes/{int(ano_r)}/{int(mes_r)}").json()
-            acumulado_r = requests.get(f"{API}/saldo-acumulado/{int(ano_r)}/{int(mes_r)}").json()
+    st.divider()
 
-            ano_ant_r = int(ano_r) - 1 if int(mes_r) == 1 else int(ano_r)
-            mes_ant_r = 12 if int(mes_r) == 1 else int(mes_r) - 1
-            acumulado_ant_r = requests.get(f"{API}/saldo-acumulado/{ano_ant_r}/{mes_ant_r}").json()
+    col_pdf, col_excel = st.columns(2)
 
-            ativos_r = requests.get(f"{API}/ativos").json()
-
-            movs_mes = []
-            for a in ativos_r:
-                movs_ativo = requests.get(f"{API}/movimentacoes?ativo_id={a['id']}").json()
-                for m in movs_ativo:
-                    try:
-                        d = datetime.strptime(m["data"], "%Y-%m-%d")
-                        if d.year == int(ano_r) and d.month == int(mes_r):
-                            movs_mes.append(m)
-                    except Exception:
-                        pass
-
-            if not dados_r and not resumo_inv_r and not movs_mes:
-                st.warning("Nenhum dado neste mês para gerar o relatório.")
+    # ---------- PDF ----------
+    with col_pdf:
+        st.markdown("### 📄 PDF")
+        st.caption("Resumo completo com totais, listas, rendimento e gráficos.")
+        if st.button("Gerar PDF", key="btn_gerar_pdf"):
+            if not senha_arquivo:
+                st.error("Digite uma senha antes de gerar.")
             else:
-                pdf_bytes = gerar_pdf(
-                    ano=int(ano_r), mes=int(mes_r),
-                    transacoes=dados_r,
-                    resumo_inv=resumo_inv_r,
-                    saldo_ant=acumulado_ant_r.get("saldo", 0),
-                    saldo_atual=acumulado_r.get("saldo", 0),
-                    ativos=ativos_r,
-                    movimentacoes_mes=movs_mes,
-                    senha_pdf=senha_pdf,
-                )
-                st.download_button(
-                    label="⬇️ Baixar PDF",
-                    data=pdf_bytes,
-                    file_name=f"resumo_{int(ano_r)}_{int(mes_r):02d}.pdf",
-                    mime="application/pdf",
-                )
+                dados_r = requests.get(f"{API}/transacoes/mes/{int(ano_r)}/{int(mes_r)}").json()
+                resumo_inv_r = requests.get(f"{API}/movimentacoes/mes/{int(ano_r)}/{int(mes_r)}").json()
+                acumulado_r = requests.get(f"{API}/saldo-acumulado/{int(ano_r)}/{int(mes_r)}").json()
+
+                ano_ant_r = int(ano_r) - 1 if int(mes_r) == 1 else int(ano_r)
+                mes_ant_r = 12 if int(mes_r) == 1 else int(mes_r) - 1
+                acumulado_ant_r = requests.get(f"{API}/saldo-acumulado/{ano_ant_r}/{mes_ant_r}").json()
+
+                ativos_r = requests.get(f"{API}/ativos").json()
+
+                movs_mes = []
+                for a in ativos_r:
+                    movs_ativo = requests.get(f"{API}/movimentacoes?ativo_id={a['id']}").json()
+                    for m in movs_ativo:
+                        try:
+                            d = datetime.strptime(m["data"], "%Y-%m-%d")
+                            if d.year == int(ano_r) and d.month == int(mes_r):
+                                movs_mes.append(m)
+                        except Exception:
+                            pass
+
+                if not dados_r and not resumo_inv_r and not movs_mes:
+                    st.warning("Nenhum dado neste mês para gerar o relatório.")
+                else:
+                    pdf_bytes = gerar_pdf(
+                        ano=int(ano_r), mes=int(mes_r),
+                        transacoes=dados_r,
+                        resumo_inv=resumo_inv_r,
+                        saldo_ant=acumulado_ant_r.get("saldo", 0),
+                        saldo_atual=acumulado_r.get("saldo", 0),
+                        ativos=ativos_r,
+                        movimentacoes_mes=movs_mes,
+                        senha_pdf=senha_arquivo,
+                    )
+                    st.download_button(
+                        label="⬇️ Baixar PDF",
+                        data=pdf_bytes,
+                        file_name=f"resumo_{int(ano_r)}_{int(mes_r):02d}.pdf",
+                        mime="application/pdf",
+                        key="dl_pdf",
+                    )
+
+    # ---------- Excel ----------
+    with col_excel:
+        st.markdown("### 📊 Excel")
+        st.caption("Três abas: Transações, Investimentos e Recorrentes.")
+        if st.button("Gerar Excel", key="btn_gerar_excel"):
+            if not senha_arquivo:
+                st.error("Digite uma senha antes de gerar.")
+            else:
+                dados_r = requests.get(f"{API}/transacoes/mes/{int(ano_r)}/{int(mes_r)}").json()
+                ativos_r = requests.get(f"{API}/ativos").json()
+                recorrentes_r = requests.get(f"{API}/recorrentes").json()
+
+                if not dados_r and not ativos_r and not recorrentes_r:
+                    st.warning("Nenhum dado para exportar.")
+                else:
+                    excel_bytes = gerar_excel(
+                        ano=int(ano_r), mes=int(mes_r),
+                        transacoes=dados_r,
+                        ativos=ativos_r,
+                        recorrentes=recorrentes_r,
+                        senha_excel=senha_arquivo,
+                    )
+                    st.download_button(
+                        label="⬇️ Baixar Excel",
+                        data=excel_bytes,
+                        file_name=f"resumo_{int(ano_r)}_{int(mes_r):02d}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_excel",
+                    )
 
 # ============ ABA BACKUP ============
 with aba_backup:
