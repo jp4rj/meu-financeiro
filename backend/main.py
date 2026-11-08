@@ -1,12 +1,17 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import extract
 from typing import List
-from datetime import date
+from datetime import date, datetime
 from pydantic import BaseModel
 import calendar
+import os
+import shutil
+import sqlite3
+import tempfile
 
-from .database import Base, engine, SessionLocal
+from .database import Base, engine, SessionLocal, CAMINHO_DB
 from .models import (
     Transacao, Recorrente, RecorrenteGerada,
     Ativo, MovimentacaoInvestimento, AtualizacaoSaldo,
@@ -24,6 +29,8 @@ from .schemas import (
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Meu Financeiro")
+
+DB_FILE = CAMINHO_DB
 
 
 def get_db():
@@ -195,7 +202,6 @@ def criar_ativo(a: AtivoCreate, db: Session = Depends(get_db)):
 
 
 def _calcular_saldo_ativo(ativo_id: int, db: Session) -> float:
-    """Saldo do ativo = saldo da última atualização + (aportes − resgates) desde ela."""
     ultima = (
         db.query(AtualizacaoSaldo)
         .filter(AtualizacaoSaldo.ativo_id == ativo_id)
@@ -204,7 +210,6 @@ def _calcular_saldo_ativo(ativo_id: int, db: Session) -> float:
     )
     if not ultima:
         return 0.0
-
     movs_desde = (
         db.query(MovimentacaoInvestimento)
         .filter(MovimentacaoInvestimento.ativo_id == ativo_id)
@@ -245,10 +250,9 @@ def editar_ativo(ativo_id: int, dados: AtivoUpdate, db: Session = Depends(get_db
     return a
 
 
-# ---------- Movimentações (Aporte / Resgate) ----------
+# ---------- Movimentações ----------
 
 def _criar_ou_atualizar_espelho(mov: MovimentacaoInvestimento, ativo: Ativo, db: Session):
-    """Aporte → despesa espelho; Resgate → receita espelho. Rendimento/Prejuízo não têm espelho."""
     if mov.tipo in ("Rendimento", "Prejuízo"):
         if mov.transacao_id:
             espelho = db.query(Transacao).filter(Transacao.id == mov.transacao_id).first()
@@ -319,7 +323,7 @@ def editar_movimentacao(mov_id: int, dados: MovimentacaoUpdate, db: Session = De
     if not m:
         raise HTTPException(status_code=404, detail="Movimentação não encontrada")
     if m.automatica:
-        raise HTTPException(status_code=400, detail="Movimentações automáticas (Rendimento/Prejuízo) são geradas pela atualização de saldo e não podem ser editadas aqui.")
+        raise HTTPException(status_code=400, detail="Movimentações automáticas (Rendimento/Prejuízo) não podem ser editadas aqui.")
     alteracoes = dados.model_dump(exclude_unset=True)
     if "tipo" in alteracoes and alteracoes["tipo"] not in (None, "Aporte", "Resgate"):
         raise HTTPException(status_code=400, detail="Tipo deve ser Aporte ou Resgate")
@@ -357,7 +361,6 @@ def criar_atualizacao_saldo(a: AtualizacaoSaldoCreate, db: Session = Depends(get
     if not ativo:
         raise HTTPException(status_code=404, detail="Ativo não encontrado")
 
-    # última atualização (antes desta)
     ultima = (
         db.query(AtualizacaoSaldo)
         .filter(AtualizacaoSaldo.ativo_id == a.ativo_id)
@@ -366,7 +369,6 @@ def criar_atualizacao_saldo(a: AtualizacaoSaldoCreate, db: Session = Depends(get
     )
 
     if ultima is None:
-        # primeira atualização = saldo inicial, sem cálculo de rendimento
         nova = AtualizacaoSaldo(
             ativo_id=a.ativo_id, data=a.data, saldo_informado=a.saldo_informado,
             saldo_anterior=None, aportes_periodo=0, resgates_periodo=0,
@@ -377,7 +379,6 @@ def criar_atualizacao_saldo(a: AtualizacaoSaldoCreate, db: Session = Depends(get
         db.refresh(nova)
         return nova
 
-    # cálculo do rendimento do período
     movs = (
         db.query(MovimentacaoInvestimento)
         .filter(MovimentacaoInvestimento.ativo_id == a.ativo_id)
@@ -400,7 +401,6 @@ def criar_atualizacao_saldo(a: AtualizacaoSaldoCreate, db: Session = Depends(get
     db.add(nova)
     db.flush()
 
-    # cria movimentação automática de Rendimento ou Prejuízo
     if rendimento > 0:
         db.add(MovimentacaoInvestimento(
             ativo_id=a.ativo_id, data=a.data, tipo="Rendimento",
@@ -425,7 +425,7 @@ def listar_atualizacoes_saldo(ativo_id: int | None = None, db: Session = Depends
     return q.order_by(AtualizacaoSaldo.data.desc()).all()
 
 
-# ---------- Saldo acumulado do mês ----------
+# ---------- Saldo acumulado ----------
 
 @app.get("/saldo-acumulado/{ano}/{mes}", response_model=SaldoAcumulado)
 def saldo_acumulado_ate(ano: int, mes: int, db: Session = Depends(get_db)):
@@ -445,3 +445,92 @@ def saldo_acumulado_ate(ano: int, mes: int, db: Session = Depends(get_db)):
         saldo=saldo, receitas=receitas, despesas=despesas,
         aportes=aportes, resgates=resgates,
     )
+
+
+# ---------- Backup e Restauração ----------
+
+@app.get("/backup")
+def baixar_backup():
+    if not os.path.exists(DB_FILE):
+        raise HTTPException(status_code=404, detail="Banco de dados não encontrado")
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    tmp.close()
+
+    try:
+        import sqlcipher3
+        import keyring
+
+        senha = keyring.get_password("meu_financeiro", "jamiro")
+        if not senha:
+            raise HTTPException(status_code=500, detail="Senha não encontrada no keyring")
+
+        src = sqlcipher3.connect(DB_FILE)
+        src.execute(f"PRAGMA key = '{senha}'")
+        dst = sqlcipher3.connect(tmp.name)
+        dst.execute(f"PRAGMA key = '{senha}'")
+        with dst:
+            src.backup(dst)
+        src.close()
+        dst.close()
+    except HTTPException:
+        os.unlink(tmp.name)
+        raise
+    except Exception as e:
+        os.unlink(tmp.name)
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar backup: {e}")
+
+    nome = f"financeiro_{datetime.now().strftime('%Y-%m-%d_%H%M')}.db"
+    return FileResponse(tmp.name, media_type="application/octet-stream", filename=nome)
+
+
+@app.post("/restaurar")
+async def restaurar_backup(arquivo: UploadFile = File(...)):
+    conteudo = await arquivo.read()
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    tmp.write(conteudo)
+    tmp.close()
+
+    try:
+        import sqlcipher3
+        import keyring
+
+        senha = keyring.get_password("meu_financeiro", "jamiro")
+        if not senha:
+            raise HTTPException(status_code=500, detail="Senha não encontrada no keyring")
+
+        con = sqlcipher3.connect(tmp.name)
+        con.execute(f"PRAGMA key = '{senha}'")
+        cur = con.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tabelas = {r[0] for r in cur.fetchall()}
+        con.close()
+    except HTTPException:
+        os.unlink(tmp.name)
+        raise
+    except Exception as e:
+        os.unlink(tmp.name)
+        raise HTTPException(status_code=400, detail=f"Arquivo inválido: {e}")
+
+    esperadas = {"transacoes", "ativos", "recorrentes"}
+    if not esperadas.issubset(tabelas):
+        os.unlink(tmp.name)
+        raise HTTPException(status_code=400, detail="O arquivo não parece ser um banco válido do Meu Financeiro.")
+
+    if os.path.exists(DB_FILE):
+        backup_atual = DB_FILE.replace(".db", f"_antes_restauracao_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db")
+        try:
+            shutil.copy2(DB_FILE, backup_atual)
+        except Exception as e:
+            os.unlink(tmp.name)
+            raise HTTPException(status_code=500, detail=f"Erro ao salvar cópia de segurança: {e}")
+
+    engine.dispose()
+
+    try:
+        shutil.move(tmp.name, DB_FILE)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao substituir banco: {e}")
+
+    return {"ok": True, "mensagem": "Banco restaurado. Feche esta aba e rode ./iniciar.sh novamente."}

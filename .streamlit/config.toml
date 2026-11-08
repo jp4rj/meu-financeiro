@@ -11,3 +11,8 @@ headless = true
 
 [browser]
 gatherUsageStats = false
+
+[client]
+# Tenta reconectar automaticamente quando a conexão cai
+reconnectAttempts = 10
+reconnectDelay = 1000

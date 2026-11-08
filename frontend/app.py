@@ -13,7 +13,32 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.graphics.shapes import Drawing, String
 from reportlab.graphics.charts.barcharts import HorizontalBarChart
 from reportlab.graphics.charts.linecharts import HorizontalLineChart
-from reportlab.graphics.charts.legends import Legend
+
+import keyring
+import bcrypt
+
+# --- Autenticação via keyring ---
+SENHA_APP = keyring.get_password("meu_financeiro", "jamiro")
+if not SENHA_APP:
+    st.error("Senha não encontrada no cofre do sistema. Configure o keyring primeiro.")
+    st.stop()
+
+SENHA_HASH = bcrypt.hashpw(SENHA_APP.encode("utf-8"), bcrypt.gensalt())
+
+if "autenticado" not in st.session_state:
+    st.session_state.autenticado = False
+
+if not st.session_state.autenticado:
+    st.title("🔐 Meu Financeiro")
+    st.caption("Acesso restrito")
+    senha_input = st.text_input("Senha", type="password", key="senha_login")
+    if st.button("Entrar"):
+        if bcrypt.checkpw(senha_input.encode("utf-8"), SENHA_HASH):
+            st.session_state.autenticado = True
+            st.rerun()
+        else:
+            st.error("Senha incorreta.")
+    st.stop()
 
 API = "http://127.0.0.1:8000"
 
@@ -34,15 +59,29 @@ CATEGORIAS_RECEITA = sorted([
 ])
 
 TIPOS_DESPESA_MAP = {
-    "Cartão": "Cartao",
-    "Débito Automático": "Debito Automatico",
-    "PIX/Espécie": "PIX/Especie",
+    "Cartão": "Cartão",
+    "Débito Automático": "Débito Automático",
+    "PIX/Espécie": "PIX/Espécie",
 }
 
 TIPOS_MOV = ["Aporte", "Resgate"]
 
 MESES_ABREV = ["", "Jan", "Fev", "Mar", "Abr", "Mai", "Jun",
                "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+
+# normaliza tipos antigos para exibição consistente
+NOMES_TIPO = {
+    "Cartao": "Cartão",
+    "Cartão": "Cartão",
+    "Debito Automatico": "Débito Automático",
+    "Débito Automático": "Débito Automático",
+    "PIX/Especie": "PIX/Espécie",
+    "PIX/Espécie": "PIX/Espécie",
+    "Fixo": "Fixo",
+    "Extra": "Extra",
+    "Investimento": "Investimento",
+    "Receita": "Receita",
+}
 
 st.set_page_config(page_title="Meu Financeiro", layout="wide", page_icon="💰")
 
@@ -158,7 +197,6 @@ def calcular_rendimento_carteira_mes(ano, mes, ativos):
 
 
 def calcular_evolucao_patrimonio(ano, mes, ativos):
-    """Retorna lista de (rotulo_mes, patrimonio_total) nos últimos 12 meses até o mês dado."""
     pontos = []
     for offset in range(11, -1, -1):
         m = mes - offset
@@ -168,7 +206,6 @@ def calcular_evolucao_patrimonio(ano, mes, ativos):
             y -= 1
         total = 0.0
         for a in ativos:
-            # pega a atualização de saldo mais recente até o fim deste mês
             atualizacoes = requests.get(f"{API}/atualizacoes-saldo?ativo_id={a['id']}").json()
             saldo_ref = None
             for u in sorted(atualizacoes, key=lambda x: (x["data"], x["id"])):
@@ -184,11 +221,9 @@ def calcular_evolucao_patrimonio(ano, mes, ativos):
 
 
 def grafico_rendimento_por_ativo(linhas_rend, largura=15 * cm, altura=7 * cm):
-    """Barras horizontais: rendimento (R$) de cada ativo. Verde positivo, vermelho negativo."""
     if not linhas_rend:
         return None
 
-    # ordenar por rendimento (para o gráfico ficar legível)
     linhas_ord = sorted(linhas_rend, key=lambda r: r["rendimento"])
     nomes = [r["ativo"][:25] for r in linhas_ord]
     valores = [round(r["rendimento"], 2) for r in linhas_ord]
@@ -210,7 +245,6 @@ def grafico_rendimento_por_ativo(linhas_rend, largura=15 * cm, altura=7 * cm):
     chart.valueAxis.valueStep = (max(valores) - min(valores)) / 5 if valores else 1
     chart.bars[0].strokeColor = None
 
-    # colorir cada barra
     for i, v in enumerate(valores):
         if v >= 0:
             chart.bars[(0, i)].fillColor = colors.HexColor("#2E9E5B")
@@ -223,7 +257,6 @@ def grafico_rendimento_por_ativo(linhas_rend, largura=15 * cm, altura=7 * cm):
 
 
 def grafico_evolucao_patrimonio(pontos, largura=15 * cm, altura=7 * cm):
-    """Linha: evolução do patrimônio total nos últimos 12 meses."""
     if not pontos:
         return None
 
@@ -287,7 +320,6 @@ def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, 
     story.append(Paragraph(f"Gerado em {datetime.now().strftime('%d/%m/%Y às %H:%M')}", styles["Sub"]))
     story.append(Spacer(1, 12))
 
-    # ---- Totais do mês ----
     story.append(Paragraph("Totais do mês", styles["H2Custom"]))
     df = pd.DataFrame(transacoes) if transacoes else pd.DataFrame()
     total_rec = df[df["valor"] > 0]["valor"].sum() if not df.empty else 0
@@ -308,7 +340,6 @@ def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, 
                                 linhas_destaque=[len(dados_totais) - 1]))
     story.append(Spacer(1, 14))
 
-    # ---- Despesas ----
     story.append(Paragraph("Despesas do mês", styles["H2Custom"]))
     desp = [t for t in transacoes if t["valor"] < 0] if transacoes else []
     if not desp:
@@ -321,7 +352,6 @@ def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, 
         story.append(_tabela_padrao(linhas, "#D9534F", [2.2 * cm, 5.5 * cm, 3.5 * cm, 2 * cm, 2.3 * cm]))
     story.append(Spacer(1, 14))
 
-    # ---- Receitas ----
     story.append(Paragraph("Receitas do mês", styles["H2Custom"]))
     rec = [t for t in transacoes if t["valor"] > 0] if transacoes else []
     if not rec:
@@ -334,7 +364,6 @@ def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, 
         story.append(_tabela_padrao(linhas, "#2E9E5B", [2.2 * cm, 5.5 * cm, 3.5 * cm, 2 * cm, 2.3 * cm]))
     story.append(Spacer(1, 14))
 
-    # ---- Posição de investimentos ----
     story.append(Paragraph("Posição de investimentos", styles["H2Custom"]))
     if not ativos:
         story.append(Paragraph("Nenhum ativo cadastrado.", styles["Normal"]))
@@ -349,7 +378,6 @@ def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, 
                                      linhas_destaque=[len(linhas) - 1]))
     story.append(Spacer(1, 14))
 
-    # ---- Rendimento da carteira no mês ----
     story.append(Paragraph("Rendimento da carteira no mês", styles["H2Custom"]))
     linhas_rend, total_rend, pct_total = calcular_rendimento_carteira_mes(ano, mes, ativos)
 
@@ -389,7 +417,6 @@ def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, 
             styles["Nota"],
         ))
 
-        # ---- Gráficos ----
         story.append(Spacer(1, 10))
         story.append(Paragraph("Gráfico — Rendimento por ativo no mês", styles["H2Custom"]))
         g1 = grafico_rendimento_por_ativo(linhas_rend)
@@ -405,7 +432,6 @@ def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, 
 
     story.append(Spacer(1, 14))
 
-    # ---- Movimentações de investimento ----
     story.append(Paragraph("Movimentações de investimento no mês", styles["H2Custom"]))
     if not movimentacoes_mes:
         story.append(Paragraph("Nenhuma movimentação de investimento neste mês.", styles["Normal"]))
@@ -429,8 +455,8 @@ def gerar_pdf(ano, mes, transacoes, resumo_inv, saldo_ant, saldo_atual, ativos, 
 st.title("💰 Meu Financeiro")
 st.caption("Controle de gastos, despesas fixas, investimentos e parcelamentos")
 
-aba_lancar, aba_mes, aba_graficos, aba_recorrentes, aba_invest, aba_relatorios = st.tabs(
-    ["➕ Lançar", "📊 Resumo do mês", "📈 Gráficos", "🔁 Recorrentes", "💼 Investimentos", "📄 Relatórios"]
+aba_lancar, aba_mes, aba_graficos, aba_recorrentes, aba_invest, aba_relatorios, aba_backup = st.tabs(
+    ["➕ Lançar", "📊 Resumo do mês", "📈 Gráficos", "🔁 Recorrentes", "💼 Investimentos", "📄 Relatórios", "⚙️ Backup"]
 )
 
 # ============ ABA LANÇAR ============
@@ -536,12 +562,11 @@ with aba_mes:
         df = pd.DataFrame(dados) if dados else pd.DataFrame()
         if not df.empty:
             df["data"] = pd.to_datetime(df["data"]).dt.date
+            df["tipo"] = df["tipo"].apply(lambda x: NOMES_TIPO.get(x, x))
 
-        df_desp = df[df["valor"] < 0].copy() if not df.empty else pd.DataFrame()
-        df_rec = df[df["valor"] > 0].copy() if not df.empty else pd.DataFrame()
-
-        total_desp = df_desp["valor"].sum() if not df_desp.empty else 0
-        total_rec = df_rec["valor"].sum() if not df_rec.empty else 0
+        # Totais do mês (sempre do mês inteiro, não filtrados)
+        total_desp = df[df["valor"] < 0]["valor"].sum() if not df.empty else 0
+        total_rec = df[df["valor"] > 0]["valor"].sum() if not df.empty else 0
         aportes = resumo_inv.get("aportes", 0)
         resgates = resumo_inv.get("resgates", 0)
         rendimentos = resumo_inv.get("rendimentos", 0)
@@ -606,20 +631,61 @@ with aba_mes:
 
         st.divider()
 
+        # ---------- Filtros (recolhidos, expandem ao clicar) ----------
+        filtro_ativo = False
+        cats_sel = []
+        tipos_sel = []
+        busca = ""
+        df_desp = df[df["valor"] < 0].copy() if not df.empty else pd.DataFrame()
+        df_rec = df[df["valor"] > 0].copy() if not df.empty else pd.DataFrame()
+
+        with st.expander("🔎 Consultar e filtrar transações", expanded=False):
+            fc1, fc2, fc3 = st.columns(3)
+            busca = fc1.text_input("Buscar na descrição", key="busca_mes")
+            categorias_disp = sorted(df["categoria"].dropna().unique().tolist()) if not df.empty else []
+            cats_sel = fc2.multiselect("Categorias", categorias_disp, key="cats_mes")
+            tipos_disp = sorted(df["tipo"].dropna().unique().tolist()) if not df.empty else []
+            tipos_sel = fc3.multiselect("Tipos", tipos_disp, key="tipos_mes")
+
+            df_filtrado = df.copy() if not df.empty else df
+            if not df_filtrado.empty:
+                if busca:
+                    df_filtrado = df_filtrado[df_filtrado["descricao"].str.contains(busca, case=False, na=False)]
+                if cats_sel:
+                    df_filtrado = df_filtrado[df_filtrado["categoria"].isin(cats_sel)]
+                if tipos_sel:
+                    df_filtrado = df_filtrado[df_filtrado["tipo"].isin(tipos_sel)]
+
+            filtro_ativo = bool(busca) or bool(cats_sel) or bool(tipos_sel)
+            if filtro_ativo:
+                n_original = len(df)
+                n_filtrado = len(df_filtrado)
+                tot_desp_filt = df_filtrado[df_filtrado["valor"] < 0]["valor"].sum() if not df_filtrado.empty else 0
+                tot_rec_filt = df_filtrado[df_filtrado["valor"] > 0]["valor"].sum() if not df_filtrado.empty else 0
+
+                st.info(
+                    f"🔎 **Resultado do filtro:** {n_filtrado} de {n_original} transações · "
+                    f"Despesas filtradas: **R$ {abs(tot_desp_filt):,.2f}** · "
+                    f"Receitas filtradas: **R$ {tot_rec_filt:,.2f}**"
+                )
+
+            df_desp = df_filtrado[df_filtrado["valor"] < 0].copy() if not df_filtrado.empty else pd.DataFrame()
+            df_rec = df_filtrado[df_filtrado["valor"] > 0].copy() if not df_filtrado.empty else pd.DataFrame()
+
+            # Total por tipo (só aparece dentro do expander)
+            if not df_desp.empty:
+                st.write("**Total de despesas por tipo (filtrado):**")
+                por_tipo = df_desp.groupby("tipo")["valor"].sum().reset_index()
+                por_tipo["valor"] = por_tipo["valor"].abs()
+                por_tipo = por_tipo.rename(columns={"tipo": "Tipo", "valor": "Total"})
+                st.dataframe(por_tipo, use_container_width=True, hide_index=True)
+
         st.markdown("### 🔴 Despesas do mês")
         if df_desp.empty:
-            st.info("Nenhuma despesa neste mês.")
+            st.info("Nenhuma despesa com os filtros atuais.")
         else:
-            st.write(f"**Total: R$ {abs(total_desp):,.2f}**")
-            st.write("**Total por tipo:**")
-            nomes_tipo = {"Fixo": "Fixo (legado)", "Cartao": "Cartão", "Extra": "Extra (legado)",
-                          "Debito Automatico": "Débito Automático", "PIX/Especie": "PIX/Espécie",
-                          "Investimento": "Investimento"}
-            por_tipo = df_desp.groupby("tipo")["valor"].sum().reset_index()
-            por_tipo["tipo"] = por_tipo["tipo"].map(lambda x: nomes_tipo.get(x, x))
-            por_tipo["valor"] = por_tipo["valor"].abs()
-            por_tipo = por_tipo.rename(columns={"tipo": "Tipo", "valor": "Total"})
-            st.dataframe(por_tipo, use_container_width=True, hide_index=True)
+            total_desp_filtrado = df_desp["valor"].sum()
+            st.write(f"**Total filtrado: R$ {abs(total_desp_filtrado):,.2f}**")
 
             st.write("**Despesas (edite selecionando uma linha):**")
             df_edit_d = df_desp.copy()
@@ -659,9 +725,10 @@ with aba_mes:
 
         st.markdown("### 🟢 Receitas do mês")
         if df_rec.empty:
-            st.info("Nenhuma receita neste mês.")
+            st.info("Nenhuma receita com os filtros atuais.")
         else:
-            st.write(f"**Total: R$ {total_rec:,.2f}**")
+            total_rec_filtrado = df_rec["valor"].sum()
+            st.write(f"**Total filtrado: R$ {total_rec_filtrado:,.2f}**")
             st.write("**Receitas (edite selecionando uma linha):**")
             df_edit_r = df_rec.copy()
             df_edit_r["data_br"] = pd.to_datetime(df_edit_r["data"]).dt.strftime("%d-%m-%Y")
@@ -710,6 +777,7 @@ with aba_graficos:
         st.info("Nenhuma transação neste mês.")
     else:
         dfg = pd.DataFrame(dados_g)
+        dfg["tipo"] = dfg["tipo"].apply(lambda x: NOMES_TIPO.get(x, x))
         dfg_desp = dfg[dfg["valor"] < 0].copy()
         dfg_rec = dfg[dfg["valor"] > 0].copy()
 
@@ -721,11 +789,7 @@ with aba_graficos:
             st.bar_chart(por_cat, color="#D9534F")
 
             st.markdown("### 🔴 Despesas por tipo")
-            nomes_tipo = {"Fixo": "Fixo (legado)", "Cartao": "Cartão", "Extra": "Extra (legado)",
-                          "Debito Automatico": "Débito Automático", "PIX/Especie": "PIX/Espécie",
-                          "Investimento": "Investimento"}
             por_tipo = dfg_desp.groupby("tipo")["valor"].sum().abs()
-            por_tipo.index = [nomes_tipo.get(t, t) for t in por_tipo.index]
             st.bar_chart(por_tipo, color="#D9534F")
 
         st.divider()
@@ -1016,3 +1080,69 @@ with aba_relatorios:
                 file_name=f"resumo_{int(ano_r)}_{int(mes_r):02d}.pdf",
                 mime="application/pdf",
             )
+
+# ============ ABA BACKUP ============
+with aba_backup:
+    st.subheader("Backup e restauração")
+    st.caption("Faça cópia de segurança dos seus dados ou restaure a partir de uma cópia anterior.")
+
+    st.markdown("### 📥 Baixar cópia do banco")
+    st.write("Gera um arquivo `.db` com todos os seus dados. Guarde em local seguro (pendrive, nuvem, etc.).")
+    if st.button("Gerar e baixar backup"):
+        r = requests.get(f"{API}/backup")
+        if r.status_code == 200:
+            nome = f"financeiro_{datetime.now().strftime('%Y-%m-%d_%H%M')}.db"
+            st.download_button(
+                label="⬇️ Baixar arquivo .db",
+                data=r.content,
+                file_name=nome,
+                mime="application/octet-stream",
+            )
+        else:
+            st.error(f"Erro ao gerar backup: {r.text}")
+
+    st.divider()
+
+    st.markdown("### 📤 Restaurar de uma cópia")
+    st.warning(
+        "⚠️ **Atenção:** a restauração substitui TODOS os dados atuais pelo conteúdo do arquivo enviado. "
+        "Uma cópia de segurança do banco atual será criada automaticamente antes da substituição. "
+        "Após restaurar, você precisará **fechar e reabrir o aplicativo** para que os dados apareçam."
+    )
+
+    arquivo = st.file_uploader("Escolha o arquivo .db", type=["db"])
+
+    if arquivo is not None:
+        st.info(f"Arquivo selecionado: **{arquivo.name}** ({len(arquivo.getvalue()) / 1024:.1f} KB)")
+
+        confirmacao = st.text_input(
+            "Para confirmar, digite **CONFIRMAR** (em maiúsculas)",
+            key="confirmacao_restauracao",
+        )
+
+        if st.button("Restaurar banco"):
+            if confirmacao != "CONFIRMAR":
+                st.error("Digite CONFIRMAR (em maiúsculas) para prosseguir.")
+            else:
+                with st.spinner("Enviando e validando arquivo..."):
+                    files = {"arquivo": (arquivo.name, arquivo.getvalue(), "application/octet-stream")}
+                    try:
+                        r = requests.post(f"{API}/restaurar", files=files, timeout=30)
+                    except Exception as e:
+                        st.error(f"Erro de comunicação: {e}")
+                        st.stop()
+
+                if r.status_code != 200:
+                    st.error(f"Erro ao restaurar: {r.text}")
+                else:
+                    st.success("✅ Banco restaurado com sucesso.")
+                    st.warning(
+                        "**Para que os dados restaurados apareçam, siga estes passos:**\n\n"
+                        "1. Feche esta aba do navegador.\n"
+                        "2. No terminal, pare o app com **Ctrl+C**.\n"
+                        "3. Rode **`./iniciar.sh`** novamente.\n"
+                        "4. Abra o app no navegador."
+                    )
+                    st.info("O backup do banco anterior foi salvo na pasta `data/` com o nome "
+                            "`financeiro_antes_restauracao_*.db`.")
+                    st.stop()
